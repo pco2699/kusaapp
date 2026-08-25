@@ -1,41 +1,11 @@
 // Habit Tracker Gauge — service worker
-// Draws a circular green gauge icon + count badge in the toolbar.
+// Fetches kusaapp state and draws a circular green gauge + count badge in the toolbar.
+import { getSettings, apiGet, computeProgress } from './common.js';
 
 const TRACK_COLOR = '#1b4332'; // dark green (0% / empty track)
 const FILL_COLOR = '#4ade80';  // vivid green (completion fill)
 
-function pad(n) { return String(n).padStart(2, '0'); }
-
-function todayStr() {
-  const d = new Date();
-  return `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())}`;
-}
-
-function dayOfWeek() {
-  return new Date().getDay(); // 0=Sun .. 6=Sat
-}
-
-async function getHabits() {
-  const { habits = [] } = await chrome.storage.local.get('habits');
-  return habits;
-}
-
-// A habit counts toward the gauge only if:
-//   - it is due today (days includes today's weekday), and
-//   - it is not "flexible" (平日どれでも) — those are excluded.
-function computeProgress(habits) {
-  const today = todayStr();
-  const dow = dayOfWeek();
-  const due = habits.filter(h => Array.isArray(h.days) && h.days.includes(dow));
-  const countable = due.filter(h => !h.flexible);
-  const done = countable.filter(h => (h.completedDates || []).includes(today));
-  const total = countable.length;
-  const completed = done.length;
-  const pct = total === 0 ? 1 : completed / total;
-  return { completed, total, pct };
-}
-
-async function drawGauge(pct, completed, total) {
+async function drawGauge(pct) {
   const size = 64;
   const canvas = new OffscreenCanvas(size, size);
   const ctx = canvas.getContext('2d');
@@ -66,39 +36,56 @@ async function drawGauge(pct, completed, total) {
   }
 
   await chrome.action.setIcon({ imageData: ctx.getImageData(0, 0, size, size) });
+}
 
-  // Badge = number of countable habits completed today
-  await chrome.action.setBadgeBackgroundColor({ color: '#14532d' });
-  if (chrome.action.setBadgeTextColor) {
-    await chrome.action.setBadgeTextColor({ color: '#ffffff' });
-  }
-  await chrome.action.setBadgeText({ text: total > 0 ? String(completed) : '' });
+async function setBadge(text, color) {
+  await chrome.action.setBadgeBackgroundColor({ color });
+  if (chrome.action.setBadgeTextColor) await chrome.action.setBadgeTextColor({ color: '#ffffff' });
+  await chrome.action.setBadgeText({ text });
 }
 
 async function update() {
-  const habits = await getHabits();
-  const { completed, total, pct } = computeProgress(habits);
-  await drawGauge(pct, completed, total);
+  let pct = 0;
+  let badgeText = '';
+  let badgeColor = '#14532d';
+  try {
+    const settings = await getSettings();
+    if (!settings.key) {
+      // not configured yet
+      badgeText = '?';
+      badgeColor = '#64748b';
+    } else {
+      const state = await apiGet(settings, '/api/state');
+      const { completed, total, pct: p } = computeProgress(state);
+      pct = p;
+      badgeText = total > 0 ? String(completed) : '';
+    }
+  } catch (e) {
+    // unreachable / bad key
+    badgeText = '!';
+    badgeColor = '#b45309';
+  }
+  await drawGauge(pct);
+  await setBadge(badgeText, badgeColor);
 }
 
-function scheduleMidnightAlarm() {
-  const now = new Date();
-  const next = new Date(now);
+function scheduleAlarms() {
+  chrome.alarms.create('refresh', { periodInMinutes: 5 });
+  const next = new Date();
   next.setHours(24, 0, 0, 0);
-  const delayMin = Math.max(1, Math.round((next - now) / 60000));
-  chrome.alarms.create('midnight', { delayInMinutes: delayMin });
+  chrome.alarms.create('midnight', { when: next.getTime() });
 }
 
-chrome.runtime.onInstalled.addListener(() => { update(); scheduleMidnightAlarm(); });
-chrome.runtime.onStartup.addListener(() => { update(); scheduleMidnightAlarm(); });
+chrome.runtime.onInstalled.addListener(() => { update(); scheduleAlarms(); });
+chrome.runtime.onStartup.addListener(() => { update(); scheduleAlarms(); });
+
+chrome.runtime.onMessage.addListener((msg) => {
+  if (msg && msg.type === 'refresh') update();
+  return false;
+});
 
 chrome.storage.onChanged.addListener((changes, area) => {
-  if (area === 'local' && changes.habits) update();
+  if (area === 'local' && changes.settings) update();
 });
 
-chrome.alarms.onAlarm.addListener((alarm) => {
-  if (alarm.name === 'midnight') {
-    update();
-    scheduleMidnightAlarm();
-  }
-});
+chrome.alarms.onAlarm.addListener(() => update());

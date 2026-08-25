@@ -1,41 +1,45 @@
 # Chrome extension — Habit Tracker Gauge
 
-[kusaapp](../README.md)（everyday セルフホスト habit tracker）のリポジトリに含まれる Chrome 拡張機能。
+[kusaapp](../README.md)（everyday セルフホスト habit tracker）の **API クライアント** として動く Chrome 拡張機能。
 
 Toolbar に「完了した habit の数を中心に、緑の円形ゲージ」を表示する。
 
-## 仕様（要件に沿った実装）
+## 仕様
 
 - **Toolbar アイコン = 円形ゲージ**
   - 0% → 暗い緑の円（空のトラック）
   - 完了率に応じて、12時方向から時計回りに鮮やかな緑の弧が伸びる
   - 100% → 全部鮮やかな緑 / 60% → 60% だけ鮮やかな緑
-- **バッジ = 今日完了した必須 habit の数**（ツールバー右下の数字）
-  - 小さいアイコンに数字を描くと潰れて読めないため、Chrome の badge 機能で数値を表示
-- **クリック → ポップアップ**（habit の追加・チェック・削除）
-- **「平日どれでも」habit はゲージの分母・分子に換算しない**（`flexible` フラグ）
+- **バッジ = 今日完了した必須 habit の数**
+  - `?` = 未設定、`!` = 接続エラー（橙）、数字 = 完了数
+- **クリック → ポップアップ**（habit の追加・チェック・削除 + サーバー設定）
+- **ゲージの換算対象**:`any_days`（any-of-weekday / 「どれでも」）を除いた
+  今日やるべき habit（daily + `all_days` で今日が対象曜日）の完了率。
+  `any_days` はリストには出るがゲージには換算しない。
 
-## インストール方法
+## データの一元化
 
-1. Chrome で `chrome://extensions` を開く
-2. 右上「デベロッパーモード」を ON
-3. 「パッケージ化されていない拡張機能を読み込む」→ この `chrome-extension/` フォルダを選択
+拡張機能自身はデータを保存しない。すべて kusaapp サーバーの API に問い合わせる:
 
-## データモデル（現状）
+- `GET /api/state` — habit 一覧 + 今日の完了状態（`done_now`）
+- `POST /api/toggle` — チェックの切替
+- `POST /api/habits` — 追加（`op:"create"`）・削除（`op:"delete"`）
+- 認証は `Authorization: Bearer <token>`
 
-```js
-{
-  id: string,
-  name: string,
-  days: number[],        // 対象曜日 0=日 .. 6=土
-  flexible: boolean,     // true = 平日どれでも（ゲージ非換算）
-  completedDates: string[] // 'YYYY-MM-DD'
-}
-```
+サーバーURL と token はポップアップの「⚙ 設定」で入力し、`chrome.storage.local` に保存する
+（拡張機能の設定のみ。habit データはサーバー側）。
 
-## 現状の制限 / ロードマップ
+## セットアップ
 
-- **現在は自己完結**（`chrome.storage.local` に保存）。kusaapp サーバーの API
-  （`GET /api/state` / `POST /api/toggle`）には未接続。
-- kusaapp 側の `any_days`（any-of-weekday）概念と、こちらの `flexible`（平日どれでも）は
-  対応関係にあり、API 接続時に統合できる。
+1. kusaapp サーバーを起動（`node server.mjs`）。拡張機能からの接続のため **CORS 有効**
+   （`server.mjs` が `Access-Control-Allow-Origin` を返す）。
+2. Chrome で `chrome://extensions` → デベロッパーモード ON →
+   「パッケージ化されていない拡張機能を読み込む」→ この `chrome-extension/` フォルダを選択。
+3. ツールバーアイコンをクリック → ⚙ 設定 → サーバーURL と token を入力 → 保存。
+
+## ファイル構成
+
+- `manifest.json` — MV3（module service worker + `host_permissions`）
+- `background.js` — ゲージ描画（OffscreenCanvas）＋バッジ更新
+- `common.js` — 設定・API 呼び出し・進捗計算（background / popup 共有）
+- `popup.html` / `popup.css` / `popup.js` — ポップアップ UI

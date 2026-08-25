@@ -56,8 +56,9 @@ This repo ships an agent skill (`skill/habit-tracker/`) so an OpenClaw/Codex-sty
 
 A companion Chrome extension lives in [`chrome-extension/`](chrome-extension/) — a toolbar
 **circular green gauge** (today's completion %) with a badge for the count of completed
-habits, plus a popup for quick check-ins. Currently self-contained
-(`chrome.storage.local`); wiring it to the kusaapp API is on the roadmap.
+habits, plus a popup for quick check-ins. It's a **client of the kusaapp API**
+(`/api/state`, `/api/toggle`, `/api/habits`) with the server URL + token configured in the
+popup's settings. The server sends CORS headers so the extension can fetch cross-origin.
 
 ## License
 

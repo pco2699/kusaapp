@@ -1,95 +1,96 @@
+import {
+  getSettings, saveSettings, apiGet, apiPost,
+  computeProgress, dueToday, dowOf, DEFAULT_URL
+} from './common.js';
+
 const DAY_LABELS = ['日', '月', '火', '水', '木', '金', '土'];
-
-function pad(n) { return String(n).padStart(2, '0'); }
-function todayStr() {
-  const d = new Date();
-  return `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())}`;
-}
-function dayOfWeek() { return new Date().getDay(); }
-
-async function getHabits() {
-  const { habits = [] } = await chrome.storage.local.get('habits');
-  return habits;
-}
-async function saveHabits(habits) {
-  await chrome.storage.local.set({ habits });
-}
+let settings = null;
+let state = null;
 
 function scheduleLabel(h) {
-  if (h.flexible) return '平日どれでも';
-  const d = h.days || [];
-  if (d.length === 7) return '毎日';
-  if (d.length === 5 && !d.includes(0) && !d.includes(6)) return '平日';
-  if (d.length === 2 && d.includes(0) && d.includes(6)) return '週末';
-  return d.map(i => DAY_LABELS[i]).join('');
+  if (h.any_days) {
+    if (h.any_days.length === 5 && [1, 2, 3, 4, 5].every(d => h.any_days.includes(d))) return '平日どれでも';
+    return 'どれでも(' + h.any_days.map(d => DAY_LABELS[d]).join('') + ')';
+  }
+  if (h.all_days) {
+    if (h.all_days.length === 7) return '毎日';
+    if (h.all_days.length === 5 && [1, 2, 3, 4, 5].every(d => h.all_days.includes(d))) return '平日';
+    if (h.all_days.length === 2 && h.all_days.includes(0) && h.all_days.includes(6)) return '週末';
+    return h.all_days.map(d => DAY_LABELS[d]).join('');
+  }
+  return '毎日';
 }
 
-function uid() {
-  return Date.now().toString(36) + Math.random().toString(36).slice(2, 7);
+function setConn(text, cls) {
+  const el = document.getElementById('connText');
+  el.textContent = text;
+  el.className = 'conn' + (cls ? ' ' + cls : '');
 }
 
-async function render() {
-  const habits = await getHabits();
+async function load() {
+  settings = await getSettings();
+  document.getElementById('urlInput').value = settings.url;
+  document.getElementById('keyInput').value = settings.key;
+
+  const noKey = !settings.key;
+  document.getElementById('setupBox').classList.toggle('hidden', !noKey);
+  document.getElementById('habitList').innerHTML = '';
+  document.getElementById('emptyState').classList.add('hidden');
+  document.getElementById('summaryText').textContent = '';
+
+  if (noKey) { setConn('サーバーを設定してください', 'warn'); return; }
+
+  try {
+    state = await apiGet(settings, '/api/state');
+    setConn('接続済み', 'ok');
+    render();
+  } catch (e) {
+    setConn(e.message === 'unauthorized' ? 'キーが無効です' : 'サーバーに接続できません', 'err');
+  }
+}
+
+function render() {
+  const dow = dowOf(state.today);
+  const r = computeProgress(state);
+  document.getElementById('summaryText').textContent =
+    r.total === 0 ? '今日の必須タスクはありません' : `今日 ${r.completed}/${r.total} 完了（${Math.round(r.pct * 100)}%）`;
+
   const list = document.getElementById('habitList');
   list.innerHTML = '';
-  const today = todayStr();
-  const dow = dayOfWeek();
+  document.getElementById('emptyState').classList.toggle('hidden', state.habits.length > 0);
 
-  const due = habits.filter(h => Array.isArray(h.days) && h.days.includes(dow));
-  const countable = due.filter(h => !h.flexible);
-  const done = countable.filter(h => (h.completedDates || []).includes(today));
-  const total = countable.length;
-  const completed = done.length;
-  const pct = total === 0 ? 1 : completed / total;
-
-  document.getElementById('summaryText').textContent =
-    total === 0
-      ? '今日の必須タスクはありません'
-      : `今日 ${completed}/${total} 完了（${Math.round(pct * 100)}%）`;
-
-  document.getElementById('emptyState').classList.toggle('hidden', habits.length > 0);
-
-  for (const h of habits) {
+  for (const h of state.habits) {
     const li = document.createElement('li');
-    const isDue = Array.isArray(h.days) && h.days.includes(dow);
-    const isDone = (h.completedDates || []).includes(today);
+    const isDue = dueToday(h, dow);
 
     const check = document.createElement('input');
     check.type = 'checkbox';
-    check.checked = isDone;
+    check.checked = isDue ? !!h.done_now : false;
     check.disabled = !isDue;
     check.addEventListener('change', async () => {
-      const all = await getHabits();
-      const target = all.find(x => x.id === h.id);
-      if (!target) return;
-      target.completedDates = target.completedDates || [];
-      if (check.checked) {
-        if (!target.completedDates.includes(today)) target.completedDates.push(today);
-      } else {
-        target.completedDates = target.completedDates.filter(d => d !== today);
-      }
-      await saveHabits(all);
-      render();
+      await apiPost(settings, '/api/toggle', { habit_id: h.id, date: state.today });
+      chrome.runtime.sendMessage({ type: 'refresh' });
+      await load();
     });
 
     const name = document.createElement('span');
     name.className = 'name';
-    name.textContent = h.name;
+    name.textContent = (h.emoji ? h.emoji + ' ' : '') + h.name;
     if (!isDue) name.classList.add('muted');
 
     const tag = document.createElement('span');
-    tag.className = 'tag' + (h.flexible ? ' flexible' : '');
+    tag.className = 'tag' + (h.any_days ? ' flexible' : '');
     tag.textContent = scheduleLabel(h);
-    if (h.flexible) tag.title = 'ゲージに換算しない';
+    if (h.any_days) tag.title = 'any-of-weekday（ゲージ非換算）';
 
     const del = document.createElement('button');
     del.className = 'del';
     del.textContent = '✕';
     del.title = '削除';
     del.addEventListener('click', async () => {
-      const all = await getHabits();
-      await saveHabits(all.filter(x => x.id !== h.id));
-      render();
+      await apiPost(settings, '/api/habits', { op: 'delete', id: h.id });
+      chrome.runtime.sendMessage({ type: 'refresh' });
+      await load();
     });
 
     li.append(check, name, tag, del);
@@ -115,15 +116,31 @@ document.querySelectorAll('[data-preset]').forEach(btn => {
 document.getElementById('addBtn').addEventListener('click', async () => {
   const name = document.getElementById('nameInput').value.trim();
   if (!name) return;
-  let days = readSelectedDays();
-  if (days.length === 0) days = [dayOfWeek()];
   const flexible = document.getElementById('flexibleInput').checked;
-  const habits = await getHabits();
-  habits.push({ id: uid(), name, days, flexible, completedDates: [] });
-  await saveHabits(habits);
+  const days = readSelectedDays();
+  let any_days = null, all_days = null;
+  if (flexible) {
+    any_days = days.length ? days : [1, 2, 3, 4, 5];
+  } else {
+    all_days = (days.length === 0 || days.length === 7) ? null : days;
+  }
+  await apiPost(settings, '/api/habits', { op: 'create', name, any_days, all_days });
   document.getElementById('nameInput').value = '';
   document.getElementById('flexibleInput').checked = false;
-  render();
+  chrome.runtime.sendMessage({ type: 'refresh' });
+  await load();
+});
+
+document.getElementById('saveBtn').addEventListener('click', async () => {
+  const url = document.getElementById('urlInput').value.trim() || DEFAULT_URL;
+  const key = document.getElementById('keyInput').value.trim();
+  await saveSettings({ url, key });
+  chrome.runtime.sendMessage({ type: 'refresh' });
+  await load();
+});
+
+document.getElementById('settingsToggle').addEventListener('click', () => {
+  document.getElementById('setupBox').classList.toggle('hidden');
 });
 
 document.getElementById('nameInput').addEventListener('keydown', e => {
@@ -131,4 +148,4 @@ document.getElementById('nameInput').addEventListener('keydown', e => {
 });
 
 setPreset('daily');
-render();
+load();

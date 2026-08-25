@@ -41,9 +41,17 @@ function dateFmt(dt) {
   return new Intl.DateTimeFormat('en-CA').format(dt);
 }
 
+function corsHeaders() {
+  return {
+    'Access-Control-Allow-Origin': '*',
+    'Access-Control-Allow-Methods': 'GET, POST, OPTIONS',
+    'Access-Control-Allow-Headers': 'Authorization, Content-Type'
+  };
+}
+
 function json(res, code, obj) {
   const body = JSON.stringify(obj);
-  res.writeHead(code, { 'Content-Type': 'application/json; charset=utf-8', 'Cache-Control': 'no-store' });
+  res.writeHead(code, { 'Content-Type': 'application/json; charset=utf-8', 'Cache-Control': 'no-store', ...corsHeaders() });
   res.end(body);
 }
 
@@ -771,6 +779,12 @@ load();
 const server = createServer(async (req, res) => {
   const urlObj = new URL(req.url, 'http://x');
   const p = urlObj.pathname;
+
+  // CORS preflight (Chrome extension fetches cross-origin; preflight carries no auth header)
+  if (req.method === 'OPTIONS') {
+    res.writeHead(204, corsHeaders());
+    return res.end();
+  }
 
   // public PWA assets (no auth)
   if (req.method === 'GET' && p.endsWith('/sw.js')) {

@@ -6,11 +6,23 @@
 </head>
 <body>
   <header>
-    <h1>Habit Tracker</h1>
+    <div class="titlebar">
+      <h1>Habit Tracker</h1>
+      <button id="settingsToggle" class="ghost" title="設定">⚙ 設定</button>
+    </div>
     <div class="summary" id="summaryText"></div>
+    <div class="conn" id="connText"></div>
   </header>
 
-  <div id="emptyState" class="empty hidden">習慣を追加しましょう</div>
+  <div id="setupBox" class="setup hidden">
+    <label for="urlInput">サーバーURL</label>
+    <input id="urlInput" type="text" placeholder="http://127.0.0.1:8090" autocomplete="off">
+    <label for="keyInput">キー（token）</label>
+    <input id="keyInput" type="password" placeholder="config.json の token" autocomplete="off">
+    <button id="saveBtn" class="primary">保存して接続</button>
+  </div>
+
+  <div id="emptyState" class="empty hidden">習慣がありません</div>
   <ul id="habitList"></ul>
 
   <section class="add">
@@ -32,11 +44,11 @@
       </div>
     </div>
     <label class="flexible">
-      <input type="checkbox" id="flexibleInput"> 平日どれでも（ゲージに換算しない）
+      <input type="checkbox" id="flexibleInput"> どれでも（any-of-weekday・ゲージ非換算）
     </label>
     <button id="addBtn" class="primary">追加</button>
   </section>
 
-  <script src="popup.js"></script>
+  <script type="module" src="popup.js"></script>
 </body>
 </html>

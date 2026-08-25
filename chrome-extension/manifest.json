@@ -1,10 +1,11 @@
 {
   "manifest_version": 3,
   "name": "Habit Tracker Gauge",
-  "version": "1.0.0",
-  "description": "Habit tracker with a circular green progress gauge in the toolbar.",
+  "version": "2.0.0",
+  "description": "Toolbar habit gauge + popup client for the kusaapp self-hosted habit tracker.",
   "permissions": ["storage", "alarms"],
-  "background": { "service_worker": "background.js" },
+  "host_permissions": ["http://*/*", "https://*/*"],
+  "background": { "service_worker": "background.js", "type": "module" },
   "action": {
     "default_popup": "popup.html",
     "default_title": "Habit Tracker"
