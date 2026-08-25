@@ -1,0 +1,12 @@
+{
+  "manifest_version": 3,
+  "name": "Habit Tracker Gauge",
+  "version": "1.0.0",
+  "description": "Habit tracker with a circular green progress gauge in the toolbar.",
+  "permissions": ["storage", "alarms"],
+  "background": { "service_worker": "background.js" },
+  "action": {
+    "default_popup": "popup.html",
+    "default_title": "Habit Tracker"
+  }
+}

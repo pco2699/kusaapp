@@ -52,6 +52,13 @@ Open `http://127.0.0.1:8090/?key=<your-token>`.
 
 This repo ships an agent skill (`skill/habit-tracker/`) so an OpenClaw/Codex-style agent can operate the tracker for you (check in, report streaks, …). See `skill/habit-tracker/SKILL.md`.
 
+## Chrome extension
+
+A companion Chrome extension lives in [`chrome-extension/`](chrome-extension/) — a toolbar
+**circular green gauge** (today's completion %) with a badge for the count of completed
+habits, plus a popup for quick check-ins. Currently self-contained
+(`chrome.storage.local`); wiring it to the kusaapp API is on the roadmap.
+
 ## License
 
 MIT
