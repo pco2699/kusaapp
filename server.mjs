@@ -325,6 +325,9 @@ const HTML = `<!doctype html>
   }
   * { box-sizing: border-box; -webkit-tap-highlight-color: transparent; }
   body { margin:0 auto; max-width:min(3400px, 96vw); background:var(--bg); color:var(--tx); font-family:-apple-system,'Segoe UI',system-ui,sans-serif; padding:20px 18px 120px; }
+  @media (min-width: 900px) {
+    body { padding-left:50px; padding-right:50px; max-width:min(3400px, calc(100vw - 100px)); }
+  }
 
   .header { display:flex; align-items:center; gap:14px; margin-bottom:16px; padding:0 4px; }
   .logo { font-size:30px; font-weight:800; letter-spacing:-.6px; flex:1; }
