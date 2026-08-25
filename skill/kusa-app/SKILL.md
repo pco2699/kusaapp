@@ -1,43 +1,65 @@
 ---
 name: kusa-app
-description: "Operate the self-hosted habit-tracker app (Kusa): check in habits, report streaks, manage habits via its HTTP API."
+description: "Kusa is the user's self-hosted habit tracker. Use whenever they ask about their habits, streaks or check-ins — \"did I do everything today\", \"check in my run\", \"how's my streak\", \"今日の習慣どう\" — or want to add or drop a habit."
 ---
 
-# Habit Tracker
+# Kusa — their habit tracker
 
-Operate the self-hosted habit tracker (`server.mjs`, node:sqlite, single file).
+Kusa is where the user keeps their daily habits. They think in **streaks**: an unbroken run is the whole point of the app, and breaking one stings. Read and update that record for them, and talk about it the way they do — "you're on day 12" beats "total=12".
 
-## Deployment facts
+The app runs in Japanese (`lang: ja`); answer in whichever language they asked in.
 
-- Server dir: `/home/pco2699/apps/habit-tracker/`
-- Listens on `127.0.0.1:8090` (port + token in `config.json` — **never commit/print the token**)
-- Auth: `?key=<token>` query param or `Authorization: Bearer <token>`
-- Start/restart: `pkill -f 'habit-tracker/server.mjs'`; then `cd ~/apps/habit-tracker && setsid node server.mjs > /tmp/habit-server.log 2>&1 < /dev/null &`
-- UI: `http://127.0.0.1:8090/?key=<token>` (PWA; offline writes are queued client-side)
+## What they ask for
 
-## API
+**"Did I do everything today?"**
+`GET /api/state`, then lead with what's still open (`done_now: false`). They want the gap, not a full dump of every habit.
 
-- `GET /api/state` → `{ today, habits: [{ id, name, emoji, any_days, days, skips, streak, longest, total, done_now }] }`
-- `POST /api/toggle` `{ habit_id, date? }` — check in / undo (date defaults to today, `YYYY-MM-DD`)
-- `POST /api/skip` `{ habit_id, date? }` — toggle skip (diagonal slash; streak bridges over, total unchanged)
-- `POST /api/habits` — `{ op:"create", name, emoji?, any_days?, all_days? }` (any_days = "any one of these days counts", all_days = "every selected day counts, others auto-skip"; weekday numbers 0=Sun…6=Sat) or `{ op:"delete", id }` (soft delete)
+**"Check in my run."** / **"ランニングやった"**
+`POST /api/toggle` with the habit id. The same call undoes it if they say they logged it by mistake. Confirm the new streak back to them — that's the part they're actually asking about.
 
-## Semantics
+**"I was sick / traveling — don't break my streak."**
+That's `POST /api/skip`, *not* a check-in. A skipped day keeps the run alive and doesn't inflate the total. Whenever they explain a miss rather than just admitting one, offer this instead of letting the streak die.
 
-- Daily habits: streak counts consecutive days; skipped days bridge the streak.
-- Any-of habits (`any_days`): one hit per period counts. Period = maximal run of consecutive allowed weekdays (Mon-based, wrap-aware: e.g. [0,6] is one weekend period). Toggling a non-allowed weekday returns 400.
-- All-of habits (`all_days`): streak counts consecutive *scheduled* (allowed) days; non-allowed days bridge automatically (auto-skip). Toggling a non-allowed weekday returns 400.
-- Theme: light/dark toggle in header, persisted in localStorage (`theme`), `?theme=dark|light` URL param also supported.
-- `days` = check-ins, `skips` = skipped dates, `total` = check-ins only.
+**"How am I doing?"**
+`streak` is the current run, `longest` is their record, `total` is lifetime check-ins. When the current run is near the record, say so — that's the number they care about.
 
-## Common tasks
+**"Add a habit."** / **"Drop that one."**
+`POST /api/habits` with `op: create` / `op: delete`. Deletes are soft and recoverable, but confirm first: from their side, the history disappears with it.
 
-- Daily report: `GET /api/state`, summarize each habit's streak/total, mention misses (done_now=false).
-- Check in: `POST /api/toggle` with habit_id.
-- Verify server: `GET /api/health` (with key) or check the port with `ss -tlnp | grep 8090`.
+## How habits are shaped
+
+Three kinds, and the kind decides whether a blank day is even a miss:
+
+- **Daily** — every day counts; the streak is consecutive days.
+- **Any-of** (`any_days`) — "sometime this weekend", "once during the week". One check-in anywhere in the period is enough. A period is a run of consecutive allowed weekdays and wraps around, so Sat+Sun is *one* weekend, not two chances.
+- **All-of** (`all_days`) — "every weekday". Only scheduled days count; the rest bridge the streak automatically. An empty Sunday on a weekdays-only habit is not a miss — never report it as one.
+
+Weekdays are `0`=Sun … `6`=Sat. Checking in on a day the habit doesn't run returns 400: that's the schedule talking, not a failure to retry.
+
+## Talking to it
+
+Base URL `http://127.0.0.1:8090`. Token lives in `config.json` — never print or commit it.
+Auth: `?key=<token>` or `Authorization: Bearer <token>`.
+
+| Call | Does |
+| --- | --- |
+| `GET /api/state` | everything: `{ today, habits: [{ id, name, emoji, any_days, all_days, days, skips, streak, longest, total, done_now }] }` — `?days=N` widens the window |
+| `POST /api/toggle` `{ habit_id, date? }` | check in / undo; `date` defaults to today (`YYYY-MM-DD`) |
+| `POST /api/skip` `{ habit_id, date? }` | mark skipped / unskip |
+| `POST /api/habits` | `{ op:"create", name, emoji?, any_days?, all_days? }` → `{ id }`, or `{ op:"delete", id }` |
+| `GET /api/health` | `{ ok: true }` |
+
+`days` = check-in dates, `skips` = skipped dates, `total` counts check-ins only.
 
 ## Gotchas
 
-- Do not inline the token in shell commands (it breaks in quotes/escaping); build URLs with `URL` + `searchParams` in a small Node script, or read `config.json` from a script.
-- After editing `server.mjs`, run `node --check server.mjs` and verify the *served* page script too (extract `<script>` content and `node --check` it) — the HTML lives in a JS template literal, so backslashes need `\\`.
-- `habits.db` and `config.json` must stay out of git (`.gitignore` covers them).
+- **"I checked in on my phone but it's gone."** The PWA queues writes locally while offline and flushes on reconnect — have them reopen the app on a connection before treating it as lost data.
+- Don't inline the token in a shell one-liner; quoting mangles it. Read `config.json` from a small Node script and build URLs with `URL` + `searchParams`.
+- After editing `server.mjs`: `node --check server.mjs`, then check the *served* page script too — that HTML lives inside a JS template literal, so backslashes need doubling.
+- `habits.db` and `config.json` stay out of git.
+
+## Running it
+
+systemd owns the server: `systemctl --user restart habit-tracker`, logs via `journalctl --user -u habit-tracker -n 50`.
+
+Never `pkill` the process. It was killed that way once and stayed down overnight — the unit reads a plain SIGTERM as a deliberate stop. (`Restart=always` now recovers it, but a manual `setsid node server.mjs &` still leaves an unsupervised copy that dies with its session.)
