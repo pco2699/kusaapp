@@ -1,6 +1,6 @@
 ---
-name: habit-tracker
-description: "Operate the self-hosted habit-tracker app (everyday-style): check in habits, report streaks, manage habits via its HTTP API."
+name: kusa-app
+description: "Operate the self-hosted habit-tracker app (Kusa): check in habits, report streaks, manage habits via its HTTP API."
 ---
 
 # Habit Tracker

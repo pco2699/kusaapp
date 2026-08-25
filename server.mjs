@@ -1,6 +1,6 @@
 // Habit Tracker — zero-dependency Node server (node:sqlite built-in)
 // API + single-page UI. Auth: ?key= or Authorization: Bearer <token>
-// UI: everyday.app-inspired mobile-first layout
+// UI: mobile-first card layout
 // v6 (2026-08-24): any-of-weekday habits, PWA + offline queue
 import { DatabaseSync } from 'node:sqlite';
 import { createServer } from 'node:http';
@@ -10,7 +10,8 @@ import { fileURLToPath } from 'node:url';
 
 const ROOT = dirname(fileURLToPath(import.meta.url));
 const CONFIG = JSON.parse(readFileSync(join(ROOT, 'config.json'), 'utf8'));
-const { port, token } = CONFIG;
+const { port, token, lang } = CONFIG;
+const LANG = lang === 'en' ? 'en' : 'ja';
 const DB_PATH = join(ROOT, 'habits.db');
 
 const db = new DatabaseSync(DB_PATH);
@@ -233,8 +234,8 @@ function getState() {
 
 // ---------- PWA assets ----------
 const MANIFEST = JSON.stringify({
-  name: 'everyday — habit tracker',
-  short_name: 'everyday',
+  name: 'Kusa',
+  short_name: 'Kusa',
   start_url: './?source=pwa',
   display: 'standalone',
   background_color: '#f6f7fb',
@@ -292,14 +293,21 @@ function asset(res, file, type) {
 }
 
 const HTML = `<!doctype html>
-<html lang="ja"><head>
+<html lang="${LANG}"><head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
 <meta name="theme-color" id="meta-theme" content="#f6f7fb">
-<title>everyday</title>
-<link rel="manifest" href="manifest.webmanifest">
-<link rel="icon" href="icon-192.png">
-<link rel="apple-touch-icon" href="icon-192.png">
+<title>Kusa</title>
+<script>
+  (function () {
+    var b = location.pathname;
+    if (b.charAt(b.length - 1) !== '/') b += '/';
+    function l(rel, href) { var e = document.createElement('link'); e.rel = rel; e.href = b + href; document.head.appendChild(e); }
+    l('manifest', 'manifest.webmanifest');
+    l('icon', 'icon-192.png');
+    l('apple-touch-icon', 'icon-192.png');
+  })();
+</script>
 <style>
   :root {
     color-scheme: light;
@@ -344,15 +352,18 @@ const HTML = `<!doctype html>
 
   .habit { padding:14px 14px 16px; border-bottom:1px solid var(--line); }
   .habit:last-child { border-bottom:none; }
-  .hhead { display:flex; align-items:center; gap:11px; margin-bottom:12px; }
+  .hhead { display:flex; align-items:center; gap:11px; margin-bottom:8px; }
   .hemoji { width:46px; height:46px; border-radius:14px; display:flex; align-items:center; justify-content:center; font-size:23px; flex:none; }
   .htxt { min-width:0; flex:1; }
-  .htxt .nm { font-size:17.5px; font-weight:700; white-space:nowrap; overflow:hidden; text-overflow:ellipsis; }
+  .htxt .nm { font-size:17.5px; font-weight:700; line-height:1.3; overflow-wrap:anywhere; }
   .htxt .sub { font-size:11.5px; color:var(--sub); margin-top:2px; font-weight:600; }
-  .del { background:none; border:none; color:var(--bord); font-size:17px; padding:4px; cursor:pointer; flex:none; align-self:flex-start; }
-  .del:hover { color:#ef4444; }
+  .hbtns { display:flex; gap:8px; flex:none; }
+  .hbtn { background:none; border:none; color:var(--sub); font-size:19px; padding:4px 6px; cursor:pointer; border-radius:9px; line-height:1; }
+  .hbtn:active { background:var(--soft); }
+  .hbtn.menu { font-size:23px; }
+  .hbtn.info { transform:translateY(2px); }
 
-  .badges { display:flex; gap:7px; }
+  .badges { display:flex; gap:7px; margin:0 0 12px 57px; }
   .badge { width:42px; height:42px; border-radius:50%; display:flex; flex-direction:column; align-items:center; justify-content:center; }
   .badge b { font-size:15.5px; font-weight:800; line-height:1; }
   .badge small { font-size:8.5px; font-weight:600; line-height:1; margin-top:2px; opacity:.8; }
@@ -378,14 +389,23 @@ const HTML = `<!doctype html>
             box-shadow:0 6px 18px rgba(20,30,60,.3); }
   .addbtn:active { transform:translateX(-50%) scale(.96); }
 
-  dialog { background:var(--card); color:var(--tx); border:none; border-radius:20px; padding:24px; width:min(360px, 88vw);
+  dialog { position:fixed; inset:0; margin:auto; background:var(--card); color:var(--tx); border:none; border-radius:20px; padding:24px; width:min(360px, 88vw);
            box-shadow:0 20px 60px rgba(20,30,60,.25); }
+  @media (max-width:520px) {
+    dialog { top:12px; bottom:auto; left:50%; right:auto; transform:translateX(-50%); margin:0; width:min(360px, 94vw);
+             max-height:calc(100vh - 24px); max-height:calc(100dvh - 24px); overflow:auto; }
+  }
   dialog::backdrop { background:rgba(20,25,40,.4); backdrop-filter:blur(3px); }
   dialog h3 { margin:0 0 16px; font-size:19px; }
   dialog .fld { display:flex; gap:8px; }
   dialog input { background:var(--soft); border:none; outline:none; border-radius:13px; padding:13px 14px; font-size:16px; color:var(--tx); }
   dialog input[name=name] { flex:1; }
-  dialog input[name=emoji] { width:60px; text-align:center; }
+  .emojibtn { width:60px; height:48px; border:none; border-radius:13px; background:var(--soft); color:var(--tx); font-size:24px; cursor:pointer; flex:none; display:flex; align-items:center; justify-content:center; }
+  .emojipicker { display:none; margin-top:12px; background:var(--soft); border:1px solid var(--line); border-radius:14px; padding:10px; max-height:240px; overflow:auto; }
+  .emojipicker.open { display:block; }
+  .emojipicker .erow { display:grid; grid-template-columns:repeat(8, 1fr); gap:4px; }
+  .emojipicker .erow button { background:none; border:none; font-size:22px; padding:6px 2px; cursor:pointer; border-radius:8px; }
+  .emojipicker .erow button:active { background:var(--ringbg); }
   dialog menu { display:flex; justify-content:flex-end; gap:8px; margin:18px 0 0; padding:0; }
   dialog .ghost { background:none; border:none; color:var(--sub); font-weight:600; padding:11px 15px; cursor:pointer; font-size:15px; }
   dialog .primary { background:var(--btn); border:none; color:var(--btn-tx); font-weight:700; border-radius:13px; padding:11px 22px; cursor:pointer; font-size:15px; }
@@ -403,14 +423,24 @@ const HTML = `<!doctype html>
   .chip.on { background:#10b981; border-color:#10b981; color:#fff; }
   .presets { display:flex; gap:6px; justify-content:center; margin-top:10px; }
   .pre { border:none; background:var(--soft); color:var(--sub); font-size:12px; font-weight:600; border-radius:9px; padding:7px 12px; cursor:pointer; }
+  .stats { display:flex; gap:16px; justify-content:center; margin:10px 0 6px; }
+  .stat { display:flex; flex-direction:column; align-items:center; gap:8px; }
+  .stat .badge { width:60px; height:60px; }
+  .stat .badge b { font-size:22px; }
+  .stat > span { color:var(--sub); font-size:12.5px; font-weight:600; }
+  #hmenu { position:fixed; z-index:50; background:var(--card); border:1px solid var(--line); border-radius:14px; box-shadow:0 8px 24px rgba(20,30,60,.22); padding:6px; display:none; min-width:150px; }
+  #hmenu.open { display:block; }
+  #hmenu button { display:block; width:100%; text-align:left; background:none; border:none; color:var(--tx); font-size:14px; padding:10px 12px; border-radius:9px; cursor:pointer; }
+  #hmenu button:hover { background:var(--soft); }
+  #hmenu button.danger { color:#ef4444; }
 </style>
 </head><body>
 <div class="header">
   <div>
-    <div class="logo">every<span>day</span></div>
+    <div class="logo">Ku<span>sa</span></div>
     <div id="today-line"></div>
   </div>
-  <button id="theme-btn" title="テーマ切替" onclick="toggleTheme()">🌙</button>
+  <button id="theme-btn" onclick="toggleTheme()">🌙</button>
   <div class="ringwrap">
     <svg width="64" height="64" viewBox="0 0 64 64">
       <circle class="ringbg" cx="32" cy="32" r="24"></circle>
@@ -426,18 +456,20 @@ const HTML = `<!doctype html>
   <div id="rows"></div>
 </div>
 
-<button class="addbtn" onclick="openAdd()">＋ 新しい習慣</button>
+<button class="addbtn" id="addbtn" onclick="openAdd()"></button>
 
 <dialog id="adddlg"><form method="dialog">
-  <h3>新しい習慣</h3>
+  <h3 id="newhabit-title"></h3>
   <div class="fld">
-    <input name="emoji" maxlength="4" placeholder="🙂">
-    <input name="name" placeholder="習慣の名前">
+    <button type="button" class="emojibtn" id="emojibtn" onclick="toggleEmoji()">🙂</button>
+    <input name="name" id="name-input" placeholder="">
   </div>
+  <div class="emojipicker" id="emojipicker"></div>
+  <input type="hidden" name="emoji" id="emoji-val" value="">
   <div class="modes" id="modes">
-    <label class="sel"><input type="radio" name="mode" value="daily" checked>毎日</label>
-    <label><input type="radio" name="mode" value="any">選んだ曜日の<br>どれか1回でOK</label>
-    <label><input type="radio" name="mode" value="all">選んだ曜日<br>すべて</label>
+    <label class="sel"><input type="radio" name="mode" value="daily" checked><span class="mlbl" data-i="modeDaily"></span></label>
+    <label><input type="radio" name="mode" value="any"><span class="mlbl" data-i="modeAny"></span></label>
+    <label><input type="radio" name="mode" value="all"><span class="mlbl" data-i="modeAll"></span></label>
   </div>
   <div class="dowsel">
     <div class="chips" id="dows">
@@ -459,15 +491,76 @@ const HTML = `<!doctype html>
   <button class="primary" value="ok">追加</button></menu>
 </form></dialog>
 
-<dialog id="authdlg"><form method="dialog"><p>🔑 アクセスキーを入力</p>
+<dialog id="authdlg"><form method="dialog"><p id="auth-text"></p>
 <input name="key" style="width:100%"><menu><button class="primary">OK</button></menu></form></dialog>
+
+<dialog id="statsdlg"><form method="dialog">
+  <h3 id="stats-title"></h3>
+  <div class="stats">
+    <div class="stat">
+      <div class="badge cur"><b id="stats-cur"></b></div>
+      <span id="stats-cur-label"></span>
+    </div>
+    <div class="stat">
+      <div class="badge best"><b id="stats-best"></b></div>
+      <span id="stats-best-label"></span>
+    </div>
+    <div class="stat">
+      <div class="badge tot"><b id="stats-total"></b></div>
+      <span id="stats-total-label"></span>
+    </div>
+  </div>
+  <menu><button class="ghost" value="ok">OK</button></menu>
+</form></dialog>
+
+<div id="hmenu"></div>
 
 <script>
 let KEY = localStorage.getItem('key') || new URLSearchParams(location.search).get('key');
 if (KEY) localStorage.setItem('key', KEY);
 
+// ---------- i18n ----------
+const LANG = ${JSON.stringify(LANG)};
+const I18N = {
+  ja: {
+    themeToggle:'テーマ切替', addHabit:'＋ 新しい習慣', newHabit:'新しい習慣', habitName:'習慣の名前',
+    chooseIcon:'アイコン選択', modeDaily:'毎日', modeAny:'選んだ曜日の<br>どれか1回でOK', modeAll:'選んだ曜日<br>すべて',
+    weekday:'平日', weekend:'土日', allDays:'全部', cancel:'キャンセル', add:'追加', enterKey:'🔑 アクセスキーを入力',
+    empty:'🌱 「＋ 新しい習慣」から最初の習慣を追加しよう', offline:'オフライン — キャッシュ表示中',
+    streakCur:'現在のストリーク', streakPeriod:'連続達成期間', badgeCur:'現在', badgeBest:'最長', badgeTotal:'累計',
+    bestTitle:'最長', totalTitle:'累計', delete:'削除', delConfirm1:'「', delConfirm2:'」を削除？', stats:'統計', more:'メニュー',
+    skip:'スキップ', streak:'連続', day:'日', skipHint:'長押し/右クリックでスキップ',
+    daySep:'・', anySuffix:'のどれか1回', allSuffix:' すべて'
+  },
+  en: {
+    themeToggle:'Toggle theme', addHabit:'＋ New habit', newHabit:'New habit', habitName:'Habit name',
+    chooseIcon:'Choose icon', modeDaily:'Daily', modeAny:'Any of the<br>selected days', modeAll:'All of the<br>selected days',
+    weekday:'Weekdays', weekend:'Weekend', allDays:'All', cancel:'Cancel', add:'Add', enterKey:'🔑 Enter access key',
+    empty:'🌱 Add your first habit with the ＋ button', offline:'Offline — showing cached data',
+    streakCur:'Current streak', streakPeriod:'Streak periods', badgeCur:'cur', badgeBest:'best', badgeTotal:'total',
+    bestTitle:'Longest streak', totalTitle:'Total check-ins', delete:'Delete', delConfirm1:'Delete "', delConfirm2:'"?', stats:'Stats', more:'Menu',
+    skip:'skip', streak:'streak', day:'d', skipHint:'long-press/right-click to skip',
+    daySep:'/', anySuffix:' (any one)', allSuffix:' (all)'
+  }
+};
+function t(k){ var d = I18N[LANG] || I18N.en; return (d && d[k] !== undefined) ? d[k] : k; }
+function applyI18n(){
+  document.getElementById('addbtn').textContent = t('addHabit');
+  document.getElementById('newhabit-title').textContent = t('newHabit');
+  document.getElementById('name-input').placeholder = t('habitName');
+  document.getElementById('emojibtn').title = t('chooseIcon');
+  document.getElementById('theme-btn').title = t('themeToggle');
+  document.querySelectorAll('#modes .mlbl').forEach(function(el){ el.innerHTML = t(el.dataset.i); });
+  document.querySelectorAll('#dows .chip').forEach(function(c){ c.textContent = DOW[Number(c.dataset.w)]; });
+  var PM = { weekday:'weekday', weekend:'weekend', all:'allDays' };
+  document.querySelectorAll('.presets .pre').forEach(function(el){ el.textContent = t(PM[el.dataset.p]); });
+  document.querySelector('#adddlg .ghost').textContent = t('cancel');
+  document.querySelector('#adddlg .primary').textContent = t('add');
+  document.getElementById('auth-text').innerHTML = t('enterKey');
+}
+
 const PALETTE = ['#ff6b6b','#f59e0b','#10b981','#3b82f6','#8b5cf6','#ec4899','#14b8a6','#f97316','#6366f1','#84cc16'];
-const DOW = ['日','月','火','水','木','金','土'];
+const DOW = LANG === 'en' ? ['Su','Mo','Tu','We','Th','Fr','Sa'] : ['日','月','火','水','木','金','土'];
 
 // ---------- theme ----------
 function applyTheme(th){
@@ -587,12 +680,12 @@ function buildDates(days, todayStr){
 }
 
 function anyLabel(any){
-  const names = any.map(function(w){ return DOW[w]; }).join('・');
-  return names + 'のどれか1回';
+  const names = any.map(function(w){ return DOW[w]; }).join(t('daySep'));
+  return names + t('anySuffix');
 }
 function allLabel(all){
-  const names = all.map(function(w){ return DOW[w]; }).join('・');
-  return names + ' すべて';
+  const names = all.map(function(w){ return DOW[w]; }).join(t('daySep'));
+  return names + t('allSuffix');
 }
 
 async function load() {
@@ -602,14 +695,14 @@ async function load() {
     st = await (await api('/api/state')).json();
   } catch (e) {
     if (!navigator.onLine) {
-      document.getElementById('today-line').textContent = 'オフライン — キャッシュ表示中';
+      document.getElementById('today-line').textContent = t('offline');
       return;
     }
     err(String(e && e.message || e));
     return;
   }
   const todayStr = st.today;
-  const nice = new Intl.DateTimeFormat('ja-JP',{month:'long',day:'numeric',weekday:'short'}).format(new Date());
+  const nice = new Intl.DateTimeFormat(LANG === 'en' ? 'en-US' : 'ja-JP',{month:'long',day:'numeric',weekday:'short'}).format(new Date());
   document.getElementById('today-line').textContent = nice;
   const days = dateList();
   buildDates(days, todayStr);
@@ -619,7 +712,7 @@ async function load() {
   let done = 0;
   if (!st.habits.length) {
     const e = document.createElement('div'); e.className = 'empty';
-    e.textContent = '🌱 「＋ 新しい習慣」から最初の習慣を追加しよう';
+    e.textContent = t('empty');
     rows.appendChild(e);
   }
   for (const h of st.habits) {
@@ -641,15 +734,19 @@ async function load() {
     txt.innerHTML = '<div class="nm">' + esc(h.name) + '</div>' +
       (h.any_days ? '<div class="sub">' + esc(anyLabel(h.any_days)) + '</div>' :
        (h.all_days ? '<div class="sub">' + esc(allLabel(h.all_days)) + '</div>' : ''));
-    const badges = document.createElement('div'); badges.className = 'badges';
-    const sTitle = h.any_days ? '連続達成期間' : '現在のストリーク';
-    badges.innerHTML =
-      '<div class="badge cur" title="' + sTitle + '"><b>' + h.streak + '</b><small>cur</small></div>' +
-      '<div class="badge best" title="最長"><b>' + h.longest + '</b><small>best</small></div>' +
-      '<div class="badge tot" title="累計"><b>' + h.total + '</b><small>total</small></div>';
-    const del = document.createElement('button'); del.className = 'del'; del.textContent = '✕'; del.title = '削除';
-    del.onclick = () => { if (confirm('「'+h.name+'」を削除？')) apiWrite('/api/habits',{op:'delete',id:h.id}).then(load); };
-    head.appendChild(em); head.appendChild(txt); head.appendChild(badges); head.appendChild(del);
+    const info = document.createElement('button'); info.className = 'hbtn info'; info.textContent = 'ⓘ'; info.title = t('stats');
+    info.addEventListener('click', function(){ showStats(h, color); });
+    const menu = document.createElement('button'); menu.className = 'hbtn menu'; menu.textContent = '⋮'; menu.title = t('more');
+    menu.addEventListener('click', function(e){
+      e.stopPropagation();
+      const m = document.getElementById('hmenu');
+      if (m.classList.contains('open') && menuCtx && menuCtx.id === h.id) { closeMenu(); return; }
+      const r = menu.getBoundingClientRect();
+      openMenu(h, r.right - 150, r.bottom + 6);
+    });
+    const btns = document.createElement('div'); btns.className = 'hbtns';
+    btns.appendChild(info); btns.appendChild(menu);
+    head.appendChild(em); head.appendChild(txt); head.appendChild(btns);
     block.appendChild(head);
 
     const cells = document.createElement('div');
@@ -662,7 +759,7 @@ async function load() {
       const cell = document.createElement('div');
       cell.className = 'hcell' + (off ? ' off' : '') + (isSkip ? ' skip' : '') + (ds === todayStr ? ' today' : '');
       if (set.has(ds)) cell.style.background = heatColor(color, set, ds);
-      cell.title = ds + (isSkip ? ' · スキップ' : (set.has(ds) ? ' · 連続' + runLen(set, ds) + '日' : '')) + (off ? ' · ×' : ' — 長押し/右クリックでスキップ');
+      cell.title = ds + (isSkip ? ' · ' + t('skip') : (set.has(ds) ? ' · ' + t('streak') + runLen(set, ds) + t('day') : '')) + (off ? ' · ×' : ' — ' + t('skipHint'));
       let pressTimer = null;
       cell.onclick = () => {
         if (cell.classList.contains('skip')) return;
@@ -705,8 +802,68 @@ function heatColor(color, set, ds){
   return 'color-mix(in srgb, ' + color + ' ' + pct + '%, var(--mix))';
 }
 
+// ---------- emoji picker ----------
+const EMOJIS = ['🙂','😄','😊','😌','😍','😎','🥳','😴','💪','🏃','🚶','🧘','🤸','🚴','🏋️','🏊','🧗','🥗','🍎','🥦','🍚','☕','💧','📚','📖','✍️','💻','📝','🎨','🎸','🎹','🎤','🎮','🧠','🧹','🧺','🛏️','🚿','🪥','💊','💰','📈','🌱','☀️','🌙','⭐','🔥','❤️','✅','🎯','📅','⏰','🐾'];
+function buildEmojiPicker(){
+  const el = document.getElementById('emojipicker');
+  const row = document.createElement('div'); row.className = 'erow';
+  EMOJIS.forEach(function(e){
+    const b = document.createElement('button'); b.type = 'button'; b.textContent = e;
+    b.addEventListener('click', function(){ pickEmoji(e); });
+    row.appendChild(b);
+  });
+  el.innerHTML = ''; el.appendChild(row);
+}
+function pickEmoji(e){
+  document.getElementById('emoji-val').value = e;
+  document.getElementById('emojibtn').textContent = e;
+  document.getElementById('emojipicker').classList.remove('open');
+}
+function toggleEmoji(){
+  document.getElementById('emojipicker').classList.toggle('open');
+}
+
 function openAdd(){ document.getElementById('adddlg').showModal(); }
 function closeAdd(){ document.getElementById('adddlg').close(); }
+
+// ---------- stats popup + overflow menu ----------
+function showStats(h, color){
+  const dlg = document.getElementById('statsdlg');
+  dlg.style.setProperty('--c', color);
+  document.getElementById('stats-title').textContent = (h.emoji || '✨') + ' ' + h.name;
+  document.getElementById('stats-cur').textContent = h.streak;
+  document.getElementById('stats-best').textContent = h.longest;
+  document.getElementById('stats-total').textContent = h.total;
+  document.getElementById('stats-cur-label').textContent = h.any_days ? t('streakPeriod') : t('streakCur');
+  document.getElementById('stats-best-label').textContent = t('bestTitle');
+  document.getElementById('stats-total-label').textContent = t('totalTitle');
+  dlg.showModal();
+}
+let menuCtx = null;
+function openMenu(h, x, y){
+  menuCtx = h;
+  const m = document.getElementById('hmenu');
+  m.innerHTML = '';
+  const b = document.createElement('button');
+  b.textContent = t('delete');
+  b.className = 'danger';
+  b.addEventListener('click', function(){ closeMenu(); doDelete(h.id, h.name); });
+  m.appendChild(b);
+  m.classList.add('open');
+  m.style.left = Math.min(x, window.innerWidth - 170) + 'px';
+  m.style.top = Math.min(y, window.innerHeight - 70) + 'px';
+}
+function closeMenu(){
+  document.getElementById('hmenu').classList.remove('open');
+  menuCtx = null;
+}
+function doDelete(id, name){
+  if (confirm(t('delConfirm1') + name + t('delConfirm2'))) apiWrite('/api/habits',{op:'delete',id:id}).then(load);
+}
+document.addEventListener('click', function(e){
+  const m = document.getElementById('hmenu');
+  if (m.classList.contains('open') && !m.contains(e.target)) closeMenu();
+});
 
 // add dialog: mode + weekday chips
 document.querySelectorAll('#modes label').forEach(lab => {
@@ -742,7 +899,10 @@ document.getElementById('adddlg').addEventListener('close', e => {
   const name = dlg.querySelector('input[name=name]').value.trim();
   const emoji = dlg.querySelector('input[name=emoji]').value.trim();
   const mode = dlg.querySelector('input[name=mode]:checked').value;
-  dlg.querySelector('input[name=name]').value = ''; dlg.querySelector('input[name=emoji]').value = '';
+  dlg.querySelector('input[name=name]').value = '';
+  document.getElementById('emoji-val').value = '';
+  document.getElementById('emojibtn').textContent = '🙂';
+  document.getElementById('emojipicker').classList.remove('open');
   if (!name) return;
   let any = null, all = null;
   if (mode === 'any' || mode === 'all') {
@@ -772,6 +932,8 @@ window.addEventListener('resize', () => {
     if (n !== N_DAYS) { N_DAYS = n; load(); }
   }, 200);
 });
+buildEmojiPicker();
+applyI18n();
 flushQ();
 load();
 </script></body></html>`;

@@ -1,12 +1,12 @@
-# everyday — self-hosted habit tracker
+# Kusa — self-hosted habit tracker
 
-A minimal, everyday.app-inspired habit tracker that runs as a **single Node.js file** (zero npm dependencies, uses the built-in `node:sqlite`).
+A minimal habit tracker that runs as a **single Node.js file** (zero npm dependencies, uses the built-in `node:sqlite`).
 
 ![screenshot](docs/screenshot.png)
 
 ## Features
 
-- 📱 **Mobile-first UI** — everyday.app-style card layout, big tappable cells
+- 📱 **Mobile-first UI** — card layout with big tappable cells
 - 🎨 **Streak heatmap** — cells darken as consecutive days stack up (1 day = 40% → 5+ days = full color)
 - ✂️ **Skip** — long-press (mobile) / right-click (desktop) to skip a day with a diagonal slash; the streak bridges over skipped days
 - 📆 **Any-of-weekday habits** — e.g. "run on any weekday", "gym on either weekend day". Non-target days are shown faded and rejected by the API. The streak counts *periods* (one per maximal run of allowed weekdays), not calendar days.
@@ -32,6 +32,16 @@ Open `http://127.0.0.1:8090/?key=<your-token>`.
 
 > The key is stored in `localStorage` after the first visit, so the URL with `?key=` is only needed once. PWA assets (`sw.js`, `manifest.webmanifest`, icons) are served without auth; everything else requires the key (query param or `Authorization: Bearer`).
 
+## Configuration
+
+All settings live in `config.json` (copy from `config.example.json`):
+
+| Key | Default | Description |
+| --- | --- | --- |
+| `port` | `8090` | TCP port to listen on |
+| `token` | *(no default)* | Access key required by every authenticated request — set a long random string. Passed as `?key=…` or `Authorization: Bearer` |
+| `lang` | `"ja"` | UI language: `"ja"` (Japanese) or `"en"` (English). Also sets the `<html lang>` and date formatting |
+
 ## API
 
 - `GET /api/state` — full state: habits with days, skips, streak/longest/total
@@ -50,7 +60,7 @@ Open `http://127.0.0.1:8090/?key=<your-token>`.
 
 ## Agent skill
 
-This repo ships an agent skill (`skill/habit-tracker/`) so an OpenClaw/Codex-style agent can operate the tracker for you (check in, report streaks, …). See `skill/habit-tracker/SKILL.md`.
+This repo ships an agent skill (`skill/kusa-app/`) so an OpenClaw/Codex-style agent can operate the tracker for you (check in, report streaks, …). See `skill/habit-tracker/SKILL.md`.
 
 ## Chrome extension
 
