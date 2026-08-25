@@ -16,6 +16,8 @@ A minimal habit tracker that runs as a **single Node.js file** (zero npm depende
 - 🌓 **Dark / light theme** — toggle in the header (🌙/☀️), follows the system preference by default, persisted per device (`?theme=dark|light` also works)
 - 🖥️ **Responsive** — 7-day grid on phones, up to 45 days on wide screens (cells scale up)
 - 🌱 Archiving (soft delete) — history is never lost
+- ⚡ **Fast first paint** — the server inlines the initial state into the HTML, so the
+  board renders on arrival instead of after a round trip to `/api/state`
 
 ## Requirements
 
@@ -31,6 +33,8 @@ node server.mjs
 Open `http://127.0.0.1:8090/?key=<your-token>`.
 
 > The key is stored in `localStorage` after the first visit, so the URL with `?key=` is only needed once. PWA assets (`sw.js`, `manifest.webmanifest`, icons) are served without auth; everything else requires the key (query param or `Authorization: Bearer`).
+>
+> Authenticating also sets a `kusa_key` cookie (`HttpOnly`, `SameSite=Strict`, 1 year). It authorizes **only** the `GET /` document, so later visits without `?key=` still get their state inlined into the page. Every API route continues to require the query param or the `Authorization` header — the cookie is never accepted for them, so it cannot be used for cross-site writes.
 
 ## Configuration
 
@@ -45,12 +49,46 @@ All settings live in `config.json` (copy from `config.example.json`):
 ## API
 
 - `GET /api/state` — full state: habits with days, skips, streak/longest/total
+  - `?days=N` (optional) — clip each habit's `days`/`skips` to the last `N` days. Streaks
+    and totals are still computed over the full history. Omit it for everything; the web
+    UI passes `days=180`, which is all the grid can display.
 - `POST /api/toggle` — `{ habit_id, date? }` toggle a check-in
 - `POST /api/skip` — `{ habit_id, date? }` toggle a skip (streak bridges over)
 - `POST /api/habits` — `{ op: "create", name, emoji?, any_days?: number[], all_days?: number[] }` or `{ op: "delete", id }`
   - `any_days`: array of weekday numbers (0=Sun … 6=Sat) — one hit on any of these days counts
   - `all_days`: array of weekday numbers — every selected day counts; non-selected days are auto-skipped
   - both omitted/null → daily habit
+
+## Performance
+
+The first page view is the thing this app is tuned for. What it does:
+
+- **State inlined into the document** — `GET /` embeds the initial state, so the board
+  paints without a follow-up `/api/state` request. What it embeds is clipped to the last
+  180 days, so the document stays the same size after years of check-ins.
+- **Brotli / gzip**, negotiated per request. Bodies are hashed and compressed once and
+  reused; the static ones (`sw.js`, manifest) are compressed at max quality on startup.
+- **ETags on everything**, so a repeat view revalidates into a `304` instead of
+  redownloading. Icons are served `immutable` and cached in memory.
+- **Cached state** — the computed state, its JSON and the inlined HTML are built once and
+  invalidated on writes, keeping requests off SQLite and the streak math entirely.
+- **Theme resolved in `<head>`** before the stylesheet, so a dark-mode load paints dark
+  the first time rather than flashing white and repainting.
+- **No `Intl` on the critical path** — building a formatter costs ~75ms on a throttled
+  phone. Dates are formatted directly on both sides.
+- Cells are built as one HTML string with delegated event handlers, streak heat comes
+  from five CSS classes rather than a `color-mix()` per cell, and tooltips are composed
+  on hover instead of up front.
+
+Measured on the seeded two-year database (10 habits, ~6k check-ins), Chromium throttled
+to 4× slower CPU on a 1.6 Mbps / 150 ms link:
+
+| | before | after |
+| --- | --- | --- |
+| habit grid on screen | 2306 ms | 461 ms |
+| transferred | 139 KB | 17 KB |
+| requests before first paint | 3 | 1 |
+| `GET /api/state` (p50) | 314 ms | 1.3 ms |
 
 ## Deploy notes
 
