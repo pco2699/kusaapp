@@ -253,7 +253,7 @@ const HTML = `<!doctype html>
 <style>
   :root { color-scheme: light; }
   * { box-sizing: border-box; -webkit-tap-highlight-color: transparent; }
-  body { margin:0 auto; background:#f6f7fb; color:#1c2333; font-family:-apple-system,'Segoe UI',system-ui,sans-serif; padding:20px 18px 120px; }
+  body { margin:0 auto; max-width:min(3400px, 96vw); background:#f6f7fb; color:#1c2333; font-family:-apple-system,'Segoe UI',system-ui,sans-serif; padding:20px 18px 120px; }
 
   .header { display:flex; align-items:center; gap:14px; margin-bottom:16px; padding:0 4px; }
   .logo { font-size:30px; font-weight:800; letter-spacing:-.6px; flex:1; }
