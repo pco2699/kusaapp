@@ -3,22 +3,22 @@ import {
   computeProgress, dueToday, dowOf, DEFAULT_URL
 } from './common.js';
 
-const DAY_LABELS = ['日', '月', '火', '水', '木', '金', '土'];
+const DAY_LABELS = ['Su', 'Mo', 'Tu', 'We', 'Th', 'Fr', 'Sa'];
 let settings = null;
 let state = null;
 
 function scheduleLabel(h) {
   if (h.any_days) {
-    if (h.any_days.length === 5 && [1, 2, 3, 4, 5].every(d => h.any_days.includes(d))) return '平日どれでも';
-    return 'どれでも(' + h.any_days.map(d => DAY_LABELS[d]).join('') + ')';
+    if (h.any_days.length === 5 && [1, 2, 3, 4, 5].every(d => h.any_days.includes(d))) return 'Any weekday';
+    return 'Any of: ' + h.any_days.map(d => DAY_LABELS[d]).join(' ');
   }
   if (h.all_days) {
-    if (h.all_days.length === 7) return '毎日';
-    if (h.all_days.length === 5 && [1, 2, 3, 4, 5].every(d => h.all_days.includes(d))) return '平日';
-    if (h.all_days.length === 2 && h.all_days.includes(0) && h.all_days.includes(6)) return '週末';
-    return h.all_days.map(d => DAY_LABELS[d]).join('');
+    if (h.all_days.length === 7) return 'Daily';
+    if (h.all_days.length === 5 && [1, 2, 3, 4, 5].every(d => h.all_days.includes(d))) return 'Weekdays';
+    if (h.all_days.length === 2 && h.all_days.includes(0) && h.all_days.includes(6)) return 'Weekend';
+    return h.all_days.map(d => DAY_LABELS[d]).join(' ');
   }
-  return '毎日';
+  return 'Daily';
 }
 
 function setConn(text, cls) {
@@ -38,14 +38,14 @@ async function load() {
   document.getElementById('emptyState').classList.add('hidden');
   document.getElementById('summaryText').textContent = '';
 
-  if (noKey) { setConn('サーバーを設定してください', 'warn'); return; }
+  if (noKey) { setConn('Set up your server first', 'warn'); return; }
 
   try {
     state = await apiGet(settings, '/api/state');
-    setConn('接続済み', 'ok');
+    setConn('Connected', 'ok');
     render();
   } catch (e) {
-    setConn(e.message === 'unauthorized' ? 'キーが無効です' : 'サーバーに接続できません', 'err');
+    setConn(e.message === 'unauthorized' ? 'Invalid key' : 'Cannot reach server', 'err');
   }
 }
 
@@ -53,7 +53,7 @@ function render() {
   const dow = dowOf(state.today);
   const r = computeProgress(state);
   document.getElementById('summaryText').textContent =
-    r.total === 0 ? '今日の必須タスクはありません' : `今日 ${r.completed}/${r.total} 完了（${Math.round(r.pct * 100)}%）`;
+    r.total === 0 ? 'Nothing due today' : `Today ${r.completed}/${r.total} done (${Math.round(r.pct * 100)}%)`;
 
   const list = document.getElementById('habitList');
   list.innerHTML = '';
@@ -81,12 +81,12 @@ function render() {
     const tag = document.createElement('span');
     tag.className = 'tag' + (h.any_days ? ' flexible' : '');
     tag.textContent = scheduleLabel(h);
-    if (h.any_days) tag.title = 'any-of-weekday（ゲージ非換算）';
+    if (h.any_days) tag.title = 'any-of-weekday (excluded from gauge)';
 
     const del = document.createElement('button');
     del.className = 'del';
     del.textContent = '✕';
-    del.title = '削除';
+    del.title = 'Delete';
     del.addEventListener('click', async () => {
       await apiPost(settings, '/api/habits', { op: 'delete', id: h.id });
       chrome.runtime.sendMessage({ type: 'refresh' });

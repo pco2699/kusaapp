@@ -1,5 +1,5 @@
 <!DOCTYPE html>
-<html lang="ja">
+<html lang="en">
 <head>
   <meta charset="utf-8">
   <link rel="stylesheet" href="popup.css">
@@ -8,45 +8,45 @@
   <header>
     <div class="titlebar">
       <h1>Habit Tracker</h1>
-      <button id="settingsToggle" class="ghost" title="設定">⚙ 設定</button>
+      <button id="settingsToggle" class="ghost" title="Settings" aria-label="Settings">⚙ Settings</button>
     </div>
     <div class="summary" id="summaryText"></div>
     <div class="conn" id="connText"></div>
   </header>
 
   <div id="setupBox" class="setup hidden">
-    <label for="urlInput">サーバーURL</label>
+    <label for="urlInput">Server URL</label>
     <input id="urlInput" type="text" placeholder="http://127.0.0.1:8090" autocomplete="off">
-    <label for="keyInput">キー（token）</label>
-    <input id="keyInput" type="password" placeholder="config.json の token" autocomplete="off">
-    <button id="saveBtn" class="primary">保存して接続</button>
+    <label for="keyInput">Key (token)</label>
+    <input id="keyInput" type="password" placeholder="token from config.json" autocomplete="off">
+    <button id="saveBtn" class="primary">Save &amp; connect</button>
   </div>
 
-  <div id="emptyState" class="empty hidden">習慣がありません</div>
+  <div id="emptyState" class="empty hidden">No habits yet</div>
   <ul id="habitList"></ul>
 
   <section class="add">
-    <input id="nameInput" type="text" placeholder="新しい習慣…" autocomplete="off">
+    <input id="nameInput" type="text" placeholder="New habit…" autocomplete="off">
     <div class="schedule">
       <div class="presets">
-        <button type="button" data-preset="daily">毎日</button>
-        <button type="button" data-preset="weekdays">平日</button>
-        <button type="button" data-preset="weekend">週末</button>
+        <button type="button" data-preset="daily">Daily</button>
+        <button type="button" data-preset="weekdays">Weekdays</button>
+        <button type="button" data-preset="weekend">Weekend</button>
       </div>
       <div class="days" id="dayPicker">
-        <label><input type="checkbox" value="0">日</label>
-        <label><input type="checkbox" value="1">月</label>
-        <label><input type="checkbox" value="2">火</label>
-        <label><input type="checkbox" value="3">水</label>
-        <label><input type="checkbox" value="4">木</label>
-        <label><input type="checkbox" value="5">金</label>
-        <label><input type="checkbox" value="6">土</label>
+        <label><input type="checkbox" value="0">Su</label>
+        <label><input type="checkbox" value="1">Mo</label>
+        <label><input type="checkbox" value="2">Tu</label>
+        <label><input type="checkbox" value="3">We</label>
+        <label><input type="checkbox" value="4">Th</label>
+        <label><input type="checkbox" value="5">Fr</label>
+        <label><input type="checkbox" value="6">Sa</label>
       </div>
     </div>
     <label class="flexible">
-      <input type="checkbox" id="flexibleInput"> どれでも（any-of-weekday・ゲージ非換算）
+      <input type="checkbox" id="flexibleInput"> Flexible (any-of-weekday · excluded from gauge)
     </label>
-    <button id="addBtn" class="primary">追加</button>
+    <button id="addBtn" class="primary">Add</button>
   </section>
 
   <script type="module" src="popup.js"></script>

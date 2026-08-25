@@ -1,45 +1,46 @@
 # Chrome extension — Habit Tracker Gauge
 
-[kusaapp](../README.md)（everyday セルフホスト habit tracker）の **API クライアント** として動く Chrome 拡張機能。
+A Chrome extension that works as an **API client** for [kusaapp](../../../apps/habit-tracker/README.md), the self-hosted habit tracker.
 
-Toolbar に「完了した habit の数を中心に、緑の円形ゲージ」を表示する。
+It shows a green circular gauge of today's completed habits in the toolbar.
 
-## 仕様
+## How it works
 
-- **Toolbar アイコン = 円形ゲージ**
-  - 0% → 暗い緑の円（空のトラック）
-  - 完了率に応じて、12時方向から時計回りに鮮やかな緑の弧が伸びる
-  - 100% → 全部鮮やかな緑 / 60% → 60% だけ鮮やかな緑
-- **バッジ = 今日完了した必須 habit の数**
-  - `?` = 未設定、`!` = 接続エラー（橙）、数字 = 完了数
-- **クリック → ポップアップ**（habit の追加・チェック・削除 + サーバー設定）
-- **ゲージの換算対象**:`any_days`（any-of-weekday / 「どれでも」）を除いた
-  今日やるべき habit（daily + `all_days` で今日が対象曜日）の完了率。
-  `any_days` はリストには出るがゲージには換算しない。
+- **Toolbar icon = circular gauge**
+  - 0% → dark green circle (empty track)
+  - A vivid green arc grows clockwise from 12 o'clock as completion rises
+  - 100% → fully vivid green / 60% → arc covers 60%
+- **Badge = number of required habits done today**
+  - `?` = not configured, `!` = connection error (orange), digit = completed count
+- **Click → popup** (add / check / delete habits + server settings)
+- **What the gauge counts:** completion rate of today's due habits
+  (daily habits + `all_days` habits whose weekday is today), excluding
+  `any_days` (any-of-weekday) habits. Those still appear in the list but are
+  excluded from the gauge.
 
-## データの一元化
+## No local data
 
-拡張機能自身はデータを保存しない。すべて kusaapp サーバーの API に問い合わせる:
+The extension stores no habit data itself — it only talks to the kusaapp API:
 
-- `GET /api/state` — habit 一覧 + 今日の完了状態（`done_now`）
-- `POST /api/toggle` — チェックの切替
-- `POST /api/habits` — 追加（`op:"create"`）・削除（`op:"delete"`）
-- 認証は `Authorization: Bearer <token>`
+- `GET /api/state` — habit list + today's completion state (`done_now`)
+- `POST /api/toggle` — toggle a check-in
+- `POST /api/habits` — create (`op:"create"`) / delete (`op:"delete"`)
+- Auth via `Authorization: Bearer <token>`
 
-サーバーURL と token はポップアップの「⚙ 設定」で入力し、`chrome.storage.local` に保存する
-（拡張機能の設定のみ。habit データはサーバー側）。
+Server URL and token are entered in the popup's ⚙ Settings and stored in
+`chrome.storage.local` (extension settings only; habit data lives server-side).
 
-## セットアップ
+## Setup
 
-1. kusaapp サーバーを起動（`node server.mjs`）。拡張機能からの接続のため **CORS 有効**
-   （`server.mjs` が `Access-Control-Allow-Origin` を返す）。
-2. Chrome で `chrome://extensions` → デベロッパーモード ON →
-   「パッケージ化されていない拡張機能を読み込む」→ この `chrome-extension/` フォルダを選択。
-3. ツールバーアイコンをクリック → ⚙ 設定 → サーバーURL と token を入力 → 保存。
+1. Start the kusaapp server (`node server.mjs`). CORS is enabled so the
+   extension can connect (`server.mjs` returns `Access-Control-Allow-Origin`).
+2. In Chrome, open `chrome://extensions` → enable Developer mode →
+   "Load unpacked" → select this folder.
+3. Click the toolbar icon → ⚙ Settings → enter the server URL and token → Save.
 
-## ファイル構成
+## Files
 
-- `manifest.json` — MV3（module service worker + `host_permissions`）
-- `background.js` — ゲージ描画（OffscreenCanvas）＋バッジ更新
-- `common.js` — 設定・API 呼び出し・進捗計算（background / popup 共有）
-- `popup.html` / `popup.css` / `popup.js` — ポップアップ UI
+- `manifest.json` — MV3 (module service worker + `host_permissions`)
+- `background.js` — gauge rendering (OffscreenCanvas) + badge updates
+- `common.js` — settings, API calls, progress math (shared by background/popup)
+- `popup.html` / `popup.css` / `popup.js` — popup UI
