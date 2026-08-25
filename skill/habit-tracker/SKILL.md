@@ -20,12 +20,14 @@ Operate the self-hosted habit tracker (`server.mjs`, node:sqlite, single file).
 - `GET /api/state` → `{ today, habits: [{ id, name, emoji, any_days, days, skips, streak, longest, total, done_now }] }`
 - `POST /api/toggle` `{ habit_id, date? }` — check in / undo (date defaults to today, `YYYY-MM-DD`)
 - `POST /api/skip` `{ habit_id, date? }` — toggle skip (diagonal slash; streak bridges over, total unchanged)
-- `POST /api/habits` — `{ op:"create", name, emoji?, any_days? }` (any_days = weekday numbers 0=Sun…6=Sat, "any one of these days counts") or `{ op:"delete", id }` (soft delete)
+- `POST /api/habits` — `{ op:"create", name, emoji?, any_days?, all_days? }` (any_days = "any one of these days counts", all_days = "every selected day counts, others auto-skip"; weekday numbers 0=Sun…6=Sat) or `{ op:"delete", id }` (soft delete)
 
 ## Semantics
 
 - Daily habits: streak counts consecutive days; skipped days bridge the streak.
 - Any-of habits (`any_days`): one hit per period counts. Period = maximal run of consecutive allowed weekdays (Mon-based, wrap-aware: e.g. [0,6] is one weekend period). Toggling a non-allowed weekday returns 400.
+- All-of habits (`all_days`): streak counts consecutive *scheduled* (allowed) days; non-allowed days bridge automatically (auto-skip). Toggling a non-allowed weekday returns 400.
+- Theme: light/dark toggle in header, persisted in localStorage (`theme`), `?theme=dark|light` URL param also supported.
 - `days` = check-ins, `skips` = skipped dates, `total` = check-ins only.
 
 ## Common tasks

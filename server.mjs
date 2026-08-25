@@ -32,6 +32,7 @@ CREATE TABLE IF NOT EXISTS checkins (
 `);
 try { db.exec('ALTER TABLE habits ADD COLUMN any_days TEXT'); } catch {}
 try { db.exec('ALTER TABLE checkins ADD COLUMN skip INTEGER DEFAULT 0'); } catch {}
+try { db.exec('ALTER TABLE habits ADD COLUMN all_days TEXT'); } catch {}
 
 function today() {
   return new Intl.DateTimeFormat('en-CA', { timeZone: 'America/Los_Angeles' }).format(new Date());
@@ -140,8 +141,37 @@ function longestPeriods(keys) {
   return best;
 }
 
+// ---------- all-of-weekday scheduled streak ----------
+// streak counts consecutive *scheduled* days; non-scheduled days bridge automatically
+function streakScheduled(unionSet, allowed, todayStr) {
+  let n = 0; const d = new Date(todayStr + 'T12:00:00');
+  for (let i = 0; i < 800; i++) {
+    if (allowed.has(d.getDay())) {
+      const ds = dateFmt(d);
+      if (unionSet.has(ds)) n++;
+      else if (ds !== todayStr) return n;
+    }
+    d.setDate(d.getDate() - 1);
+  }
+  return n;
+}
+function longestScheduled(unionSet, allowed, todayStr) {
+  if (!unionSet.size) return 0;
+  let best = 0, cur = 0;
+  const d = new Date([...unionSet].sort()[0] + 'T12:00:00');
+  const end = new Date(todayStr + 'T12:00:00');
+  while (d <= end) {
+    if (allowed.has(d.getDay())) {
+      if (unionSet.has(dateFmt(d))) { cur++; if (cur > best) best = cur; }
+      else cur = 0;
+    }
+    d.setDate(d.getDate() + 1);
+  }
+  return best;
+}
+
 function getState() {
-  const habits = db.prepare('SELECT id, name, emoji, any_days FROM habits WHERE archived=0 ORDER BY sort, id').all();
+  const habits = db.prepare('SELECT id, name, emoji, any_days, all_days FROM habits WHERE archived=0 ORDER BY sort, id').all();
   const out = [];
   const t = today();
   for (const h of habits) {
@@ -150,7 +180,19 @@ function getState() {
     const skips = rows.filter(r => r.skip).map(r => r.date);
     let any = null;
     try { any = h.any_days ? parseAnyDays(JSON.parse(h.any_days)) : null; } catch {}
-    if (any) {
+    let all = null;
+    try { all = h.all_days ? parseAnyDays(JSON.parse(h.all_days)) : null; } catch {}
+    if (all) {
+      const allowed = new Set(all);
+      const union = new Set([...checked, ...skips]);
+      out.push({
+        id: h.id, name: h.name, emoji: h.emoji, any_days: null, all_days: all, total: checked.length,
+        streak: streakScheduled(union, allowed, t),
+        longest: longestScheduled(union, allowed, t),
+        days: checked, skips,
+        done_now: allowed.has(new Date(t + 'T12:00:00').getDay()) ? checked.includes(t) : true
+      });
+    } else if (any) {
       const allowed = new Set(any);
       const runs = weekRuns(any);
       const satKeys = new Set(checked.map(ds => { const pi = periodInfo(ds, runs); return pi && pi.key; }).filter(Boolean));
@@ -163,7 +205,7 @@ function getState() {
         d.setDate(d.getDate() - 1);
       }
       out.push({
-        id: h.id, name: h.name, emoji: h.emoji, any_days: any, total: checked.length,
+        id: h.id, name: h.name, emoji: h.emoji, any_days: any, all_days: null, total: checked.length,
         streak: streakPeriods(satKeys, skipKeys, t, runs, allowed),
         longest: longestPeriods(new Set([...satKeys, ...skipKeys])),
         days: checked, skips,
@@ -172,7 +214,7 @@ function getState() {
     } else {
       const union = new Set([...checked, ...skips]);
       out.push({
-        id: h.id, name: h.name, emoji: h.emoji, any_days: null, total: checked.length,
+        id: h.id, name: h.name, emoji: h.emoji, any_days: null, all_days: null, total: checked.length,
         streak: streakFor(union), longest: longestFor(union),
         days: checked, skips, done_now: checked.includes(t)
       });
@@ -245,47 +287,61 @@ const HTML = `<!doctype html>
 <html lang="ja"><head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
-<meta name="theme-color" content="#f6f7fb">
+<meta name="theme-color" id="meta-theme" content="#f6f7fb">
 <title>everyday</title>
 <link rel="manifest" href="manifest.webmanifest">
 <link rel="icon" href="icon-192.png">
 <link rel="apple-touch-icon" href="icon-192.png">
 <style>
-  :root { color-scheme: light; }
+  :root {
+    color-scheme: light;
+    --bg:#f6f7fb; --tx:#1c2333; --sub:#8a93a6; --card:#fff; --line:#eef0f5;
+    --cell:#eef0f5; --inset:#f0f1f6; --slash:#b8c0cc; --soft:#f2f3f8;
+    --ringbg:#e7eaf1; --btn:#1c2333; --btn-tx:#fff; --mix:#fff; --bord:#d3d8e0;
+    --errbg:#fee2e2; --errtx:#b91c1c;
+  }
+  html[data-theme="dark"] {
+    color-scheme: dark;
+    --bg:#12141c; --tx:#e8ebf2; --sub:#8b93a7; --card:#1a1e29; --line:#262b38;
+    --cell:#262b38; --inset:#222735; --slash:#4a5164; --soft:#252a38;
+    --ringbg:#2c3242; --btn:#e8ebf2; --btn-tx:#12141c; --mix:#1a1e29; --bord:#3a4257;
+    --errbg:#3b1f1f; --errtx:#fca5a5;
+  }
   * { box-sizing: border-box; -webkit-tap-highlight-color: transparent; }
-  body { margin:0 auto; max-width:min(3400px, 96vw); background:#f6f7fb; color:#1c2333; font-family:-apple-system,'Segoe UI',system-ui,sans-serif; padding:20px 18px 120px; }
+  body { margin:0 auto; max-width:min(3400px, 96vw); background:var(--bg); color:var(--tx); font-family:-apple-system,'Segoe UI',system-ui,sans-serif; padding:20px 18px 120px; }
 
   .header { display:flex; align-items:center; gap:14px; margin-bottom:16px; padding:0 4px; }
   .logo { font-size:30px; font-weight:800; letter-spacing:-.6px; flex:1; }
   .logo span { color:#10b981; }
-  #today-line { color:#8a93a6; font-size:14px; font-weight:500; margin-top:2px; }
+  #today-line { color:var(--sub); font-size:14px; font-weight:500; margin-top:2px; }
+  #theme-btn { width:40px; height:40px; border-radius:50%; border:none; background:var(--soft); color:var(--tx); font-size:17px; cursor:pointer; flex:none; padding:0; }
   .ringwrap { position:relative; width:64px; height:64px; }
   .ringwrap svg { transform:rotate(-90deg); }
-  .ringbg { fill:none; stroke:#e7eaf1; stroke-width:6; }
+  .ringbg { fill:none; stroke:var(--ringbg); stroke-width:6; }
   #ring { fill:none; stroke:#3b82f6; stroke-width:6; stroke-linecap:round; stroke-dasharray:150.8; stroke-dashoffset:150.8; transition:stroke-dashoffset .5s cubic-bezier(.22,1,.36,1); }
-  #ring-label { position:absolute; inset:0; display:flex; align-items:center; justify-content:center; font-size:14px; font-weight:700; color:#1c2333; }
+  #ring-label { position:absolute; inset:0; display:flex; align-items:center; justify-content:center; font-size:14px; font-weight:700; color:var(--tx); }
 
-  .board { background:#fff; border-radius:22px; box-shadow:0 1px 2px rgba(20,30,60,.05), 0 10px 28px rgba(20,30,60,.06); overflow:hidden; }
+  .board { background:var(--card); border-radius:22px; box-shadow:0 1px 2px rgba(20,30,60,.05), 0 10px 28px rgba(20,30,60,.06); overflow:hidden; }
 
-  .dates { display:grid; grid-template-columns:repeat(var(--n,7), minmax(0,64px)); justify-content:center; gap:6px; padding:14px 14px 10px; border-bottom:1px solid #eef0f5; }
+  .dates { display:grid; grid-template-columns:repeat(var(--n,7), minmax(0,64px)); justify-content:center; gap:6px; padding:14px 14px 10px; border-bottom:1px solid var(--line); }
   .dates.dense .dow { display:none; }
   .dates.dense .dcol { gap:2px; }
-  .dates.dense .dnum { width:auto; height:auto; font-size:14px; color:#8a93a6; }
+  .dates.dense .dnum { width:auto; height:auto; font-size:14px; color:var(--sub); }
   .dates.dense .dcol.today .dnum { width:30px; height:30px; font-size:13.5px; background:#10b981; color:#fff; }
   .dcol { display:flex; flex-direction:column; align-items:center; gap:4px; }
-  .dow { font-size:11.5px; color:#a8b0bf; font-weight:600; }
-  .dnum { width:34px; height:34px; border-radius:50%; display:flex; align-items:center; justify-content:center; font-size:15.5px; font-weight:600; color:#1c2333; }
+  .dow { font-size:11.5px; color:var(--sub); font-weight:600; }
+  .dnum { width:34px; height:34px; border-radius:50%; display:flex; align-items:center; justify-content:center; font-size:15.5px; font-weight:600; color:var(--tx); }
   .dcol.today .dow { color:#10b981; font-weight:700; }
   .dcol.today .dnum { background:#10b981; color:#fff; }
 
-  .habit { padding:14px 14px 16px; border-bottom:1px solid #eef0f5; }
+  .habit { padding:14px 14px 16px; border-bottom:1px solid var(--line); }
   .habit:last-child { border-bottom:none; }
   .hhead { display:flex; align-items:center; gap:11px; margin-bottom:12px; }
   .hemoji { width:46px; height:46px; border-radius:14px; display:flex; align-items:center; justify-content:center; font-size:23px; flex:none; }
   .htxt { min-width:0; flex:1; }
   .htxt .nm { font-size:17.5px; font-weight:700; white-space:nowrap; overflow:hidden; text-overflow:ellipsis; }
-  .htxt .sub { font-size:11.5px; color:#8a93a6; margin-top:2px; font-weight:600; }
-  .del { background:none; border:none; color:#d3d8e0; font-size:17px; padding:4px; cursor:pointer; flex:none; align-self:flex-start; }
+  .htxt .sub { font-size:11.5px; color:var(--sub); margin-top:2px; font-weight:600; }
+  .del { background:none; border:none; color:var(--bord); font-size:17px; padding:4px; cursor:pointer; flex:none; align-self:flex-start; }
   .del:hover { color:#ef4444; }
 
   .badges { display:flex; gap:7px; }
@@ -293,52 +349,52 @@ const HTML = `<!doctype html>
   .badge b { font-size:15.5px; font-weight:800; line-height:1; }
   .badge small { font-size:8.5px; font-weight:600; line-height:1; margin-top:2px; opacity:.8; }
   .badge.cur { background:var(--c); color:#fff; }
-  .badge.best { background:color-mix(in srgb, var(--c) 14%, #fff); color:var(--c); }
-  .badge.tot { background:#f2f3f8; color:#8a93a6; }
+  .badge.best { background:color-mix(in srgb, var(--c) 14%, var(--mix)); color:var(--c); }
+  .badge.tot { background:var(--soft); color:var(--sub); }
 
   .cells { display:grid; grid-template-columns:repeat(var(--n,7), minmax(0,80px)); justify-content:center; gap:6px; }
   .cells .hcell { max-height:64px; }
   .cells.dense .hcell { max-height:88px; }
-  .hcell { aspect-ratio:1; border-radius:14px; background:#eef0f5; cursor:pointer; transition:transform .1s; }
+  .hcell { aspect-ratio:1; border-radius:14px; background:var(--cell); cursor:pointer; transition:transform .1s; }
   .hcell:active { transform:scale(1.15); }
-  .hcell.today { box-shadow:0 0 0 2.5px #fff, 0 0 0 4.5px var(--c); }
-  .hcell.skip { background-color:#eef0f5; background-image:linear-gradient(to top right, transparent calc(50% - 1.5px), #b8c0cc calc(50% - 1.5px) calc(50% + 1.5px), transparent calc(50% + 1.5px)); }
-  .hcell.off { background:transparent; box-shadow:inset 0 0 0 1.5px #f0f1f6; cursor:default; pointer-events:none; }
+  .hcell.today { box-shadow:0 0 0 2.5px var(--card), 0 0 0 4.5px var(--c); }
+  .hcell.skip { background-color:var(--cell); background-image:linear-gradient(to top right, transparent calc(50% - 1.5px), var(--slash) calc(50% - 1.5px) calc(50% + 1.5px), transparent calc(50% + 1.5px)); }
+  .hcell.off { background:transparent; box-shadow:inset 0 0 0 1.5px var(--inset); cursor:default; pointer-events:none; }
 
-  .empty { text-align:center; color:#a8b0bf; padding:52px 0; font-size:15px; }
-  #err { display:none; background:#fee2e2; color:#b91c1c; border-radius:14px; padding:12px 16px; margin:0 4px 14px; font-size:14px; }
+  .empty { text-align:center; color:var(--sub); padding:52px 0; font-size:15px; }
+  #err { display:none; background:var(--errbg); color:var(--errtx); border-radius:14px; padding:12px 16px; margin:0 4px 14px; font-size:14px; }
 
   .addbtn { position:fixed; bottom:22px; left:50%; transform:translateX(-50%);
-            background:#1c2333; color:#fff; border:none; border-radius:18px; padding:16px 30px;
+            background:var(--btn); color:var(--btn-tx); border:none; border-radius:18px; padding:16px 30px;
             font-size:16px; font-weight:700; cursor:pointer; z-index:10;
             box-shadow:0 6px 18px rgba(20,30,60,.3); }
   .addbtn:active { transform:translateX(-50%) scale(.96); }
 
-  dialog { background:#fff; color:#1c2333; border:none; border-radius:20px; padding:24px; width:min(360px, 88vw);
+  dialog { background:var(--card); color:var(--tx); border:none; border-radius:20px; padding:24px; width:min(360px, 88vw);
            box-shadow:0 20px 60px rgba(20,30,60,.25); }
   dialog::backdrop { background:rgba(20,25,40,.4); backdrop-filter:blur(3px); }
   dialog h3 { margin:0 0 16px; font-size:19px; }
   dialog .fld { display:flex; gap:8px; }
-  dialog input { background:#f2f3f8; border:none; outline:none; border-radius:13px; padding:13px 14px; font-size:16px; color:#1c2333; }
+  dialog input { background:var(--soft); border:none; outline:none; border-radius:13px; padding:13px 14px; font-size:16px; color:var(--tx); }
   dialog input[name=name] { flex:1; }
   dialog input[name=emoji] { width:60px; text-align:center; }
   dialog menu { display:flex; justify-content:flex-end; gap:8px; margin:18px 0 0; padding:0; }
-  dialog .ghost { background:none; border:none; color:#8a93a6; font-weight:600; padding:11px 15px; cursor:pointer; font-size:15px; }
-  dialog .primary { background:#1c2333; border:none; color:#fff; font-weight:700; border-radius:13px; padding:11px 22px; cursor:pointer; font-size:15px; }
+  dialog .ghost { background:none; border:none; color:var(--sub); font-weight:600; padding:11px 15px; cursor:pointer; font-size:15px; }
+  dialog .primary { background:var(--btn); border:none; color:var(--btn-tx); font-weight:700; border-radius:13px; padding:11px 22px; cursor:pointer; font-size:15px; }
 
   .modes { display:flex; gap:8px; margin:16px 0 10px; }
   .modes label { flex:1; display:flex; align-items:center; justify-content:center; gap:6px;
-                 border:1.5px solid #d3d8e0; border-radius:12px; padding:9px 6px; font-size:13px; font-weight:600; color:#8a93a6; cursor:pointer; }
-  .modes label.sel { border-color:#1c2333; background:#1c2333; color:#fff; }
+                 border:1.5px solid var(--bord); border-radius:12px; padding:9px 6px; font-size:13px; font-weight:600; color:var(--sub); cursor:pointer; }
+  .modes label.sel { border-color:var(--btn); background:var(--btn); color:var(--btn-tx); }
   .modes input { display:none; }
   .dowsel { display:none; }
-  dialog.any .dowsel { display:block; }
+  dialog.any .dowsel, dialog.all .dowsel { display:block; }
   .chips { display:flex; gap:6px; justify-content:center; }
-  .chip { width:38px; height:38px; border-radius:50%; border:1.5px solid #d3d8e0; background:#fff; color:#8a93a6;
+  .chip { width:38px; height:38px; border-radius:50%; border:1.5px solid var(--bord); background:var(--card); color:var(--sub);
           font-size:13px; font-weight:700; cursor:pointer; }
   .chip.on { background:#10b981; border-color:#10b981; color:#fff; }
   .presets { display:flex; gap:6px; justify-content:center; margin-top:10px; }
-  .pre { border:none; background:#f2f3f8; color:#8a93a6; font-size:12px; font-weight:600; border-radius:9px; padding:7px 12px; cursor:pointer; }
+  .pre { border:none; background:var(--soft); color:var(--sub); font-size:12px; font-weight:600; border-radius:9px; padding:7px 12px; cursor:pointer; }
 </style>
 </head><body>
 <div class="header">
@@ -346,6 +402,7 @@ const HTML = `<!doctype html>
     <div class="logo">every<span>day</span></div>
     <div id="today-line"></div>
   </div>
+  <button id="theme-btn" title="テーマ切替" onclick="toggleTheme()">🌙</button>
   <div class="ringwrap">
     <svg width="64" height="64" viewBox="0 0 64 64">
       <circle class="ringbg" cx="32" cy="32" r="24"></circle>
@@ -372,6 +429,7 @@ const HTML = `<!doctype html>
   <div class="modes" id="modes">
     <label class="sel"><input type="radio" name="mode" value="daily" checked>毎日</label>
     <label><input type="radio" name="mode" value="any">選んだ曜日の<br>どれか1回でOK</label>
+    <label><input type="radio" name="mode" value="all">選んだ曜日<br>すべて</label>
   </div>
   <div class="dowsel">
     <div class="chips" id="dows">
@@ -402,6 +460,28 @@ if (KEY) localStorage.setItem('key', KEY);
 
 const PALETTE = ['#ff6b6b','#f59e0b','#10b981','#3b82f6','#8b5cf6','#ec4899','#14b8a6','#f97316','#6366f1','#84cc16'];
 const DOW = ['日','月','火','水','木','金','土'];
+
+// ---------- theme ----------
+function applyTheme(th){
+  document.documentElement.setAttribute('data-theme', th);
+  const b = document.getElementById('theme-btn');
+  if (b) b.textContent = th === 'dark' ? '☀️' : '🌙';
+  const mt = document.querySelector('meta[name=theme-color]');
+  if (mt) mt.setAttribute('content', th === 'dark' ? '#12141c' : '#f6f7fb');
+}
+function toggleTheme(){
+  const cur = document.documentElement.getAttribute('data-theme') === 'dark' ? 'light' : 'dark';
+  localStorage.setItem('theme', cur);
+  applyTheme(cur);
+}
+(function(){
+  const qp = new URLSearchParams(location.search).get('theme');
+  if (qp === 'dark' || qp === 'light') { try { localStorage.setItem('theme', qp); } catch (e) {} }
+  let th = null;
+  try { th = localStorage.getItem('theme'); } catch (e) {}
+  if (!th) th = (window.matchMedia && window.matchMedia('(prefers-color-scheme: dark)').matches) ? 'dark' : 'light';
+  applyTheme(th);
+})();
 
 // responsive day count: more days on wider screens, capped at 45 for readability
 function calcDays(){
@@ -502,6 +582,10 @@ function anyLabel(any){
   const names = any.map(function(w){ return DOW[w]; }).join('・');
   return names + 'のどれか1回';
 }
+function allLabel(all){
+  const names = all.map(function(w){ return DOW[w]; }).join('・');
+  return names + ' すべて';
+}
 
 async function load() {
   if (!KEY) { showAuth(); return; }
@@ -534,7 +618,7 @@ async function load() {
     const color = PALETTE[h.id % PALETTE.length];
     const set = new Set(h.days);
     const skipSet = new Set(h.skips || []);
-    const allowed = h.any_days ? new Set(h.any_days) : null;
+    const allowed = h.any_days ? new Set(h.any_days) : (h.all_days ? new Set(h.all_days) : null);
     if (h.done_now) done++;
 
     const block = document.createElement('div');
@@ -543,11 +627,12 @@ async function load() {
 
     const head = document.createElement('div'); head.className = 'hhead';
     const em = document.createElement('div'); em.className = 'hemoji';
-    em.style.background = 'color-mix(in srgb, ' + color + ' 14%, #fff)';
+    em.style.background = 'color-mix(in srgb, ' + color + ' 14%, var(--mix))';
     em.textContent = h.emoji || '✨';
     const txt = document.createElement('div'); txt.className = 'htxt';
     txt.innerHTML = '<div class="nm">' + esc(h.name) + '</div>' +
-      (h.any_days ? '<div class="sub">' + esc(anyLabel(h.any_days)) + '</div>' : '');
+      (h.any_days ? '<div class="sub">' + esc(anyLabel(h.any_days)) + '</div>' :
+       (h.all_days ? '<div class="sub">' + esc(allLabel(h.all_days)) + '</div>' : ''));
     const badges = document.createElement('div'); badges.className = 'badges';
     const sTitle = h.any_days ? '連続達成期間' : '現在のストリーク';
     badges.innerHTML =
@@ -609,7 +694,7 @@ function runLen(set, ds){
 function heatColor(color, set, ds){
   const run = runLen(set, ds);
   const pct = Math.min(100, 40 + (run - 1) * 15);
-  return 'color-mix(in srgb, ' + color + ' ' + pct + '%, #fff)';
+  return 'color-mix(in srgb, ' + color + ' ' + pct + '%, var(--mix))';
 }
 
 function openAdd(){ document.getElementById('adddlg').showModal(); }
@@ -621,9 +706,10 @@ document.querySelectorAll('#modes label').forEach(lab => {
     document.querySelectorAll('#modes label').forEach(x => x.classList.remove('sel'));
     lab.classList.add('sel');
     const dlg = document.getElementById('adddlg');
-    const any = lab.querySelector('input').value === 'any';
-    dlg.classList.toggle('any', any);
-    if (any && !document.querySelector('#dows .chip.on')) {
+    const val = lab.querySelector('input').value;
+    dlg.classList.toggle('any', val === 'any');
+    dlg.classList.toggle('all', val === 'all');
+    if ((val === 'any' || val === 'all') && !document.querySelector('#dows .chip.on')) {
       document.querySelectorAll('#dows .chip').forEach(c => { if ([1,2,3,4,5].indexOf(Number(c.dataset.w)) >= 0) c.classList.add('on'); });
     }
   });
@@ -650,13 +736,14 @@ document.getElementById('adddlg').addEventListener('close', e => {
   const mode = dlg.querySelector('input[name=mode]:checked').value;
   dlg.querySelector('input[name=name]').value = ''; dlg.querySelector('input[name=emoji]').value = '';
   if (!name) return;
-  let any = null;
-  if (mode === 'any') {
-    any = [];
-    document.querySelectorAll('#dows .chip.on').forEach(c => any.push(Number(c.dataset.w)));
-    if (!any.length) return;
+  let any = null, all = null;
+  if (mode === 'any' || mode === 'all') {
+    const sel = [];
+    document.querySelectorAll('#dows .chip.on').forEach(c => sel.push(Number(c.dataset.w)));
+    if (!sel.length) return;
+    if (mode === 'any') any = sel; else all = sel;
   }
-  apiWrite('/api/habits', { op:'create', name: name, emoji: emoji, any_days: any }).then(r => {
+  apiWrite('/api/habits', { op:'create', name: name, emoji: emoji, any_days: any, all_days: all }).then(r => {
     if (!r || !r.queued) load();
   });
 });
@@ -708,11 +795,13 @@ const server = createServer(async (req, res) => {
 
   if (req.method === 'POST' && p === '/api/toggle') {
     const b = await body(req);
-    const h = db.prepare('SELECT any_days FROM habits WHERE id=? AND archived=0').get(b.habit_id);
+    const h = db.prepare('SELECT any_days, all_days FROM habits WHERE id=? AND archived=0').get(b.habit_id);
     if (!h) return json(res, 404, { error: 'habit not found' });
     const date = /^\d{4}-\d{2}-\d{2}$/.test(b.date || '') ? b.date : today();
     const any = h.any_days ? parseAnyDays(JSON.parse(h.any_days)) : null;
-    if (any && !any.includes(new Date(date + 'T12:00:00').getDay())) return json(res, 400, { error: 'not an allowed day for this habit' });
+    const all = h.all_days ? parseAnyDays(JSON.parse(h.all_days)) : null;
+    const sched = any || all;
+    if (sched && !sched.includes(new Date(date + 'T12:00:00').getDay())) return json(res, 400, { error: 'not an allowed day for this habit' });
     const exists = db.prepare('SELECT 1 FROM checkins WHERE habit_id=? AND date=?').get(b.habit_id, date);
     if (exists) db.prepare('DELETE FROM checkins WHERE habit_id=? AND date=?').run(b.habit_id, date);
     else db.prepare('INSERT INTO checkins (habit_id, date) VALUES (?, ?)').run(b.habit_id, date);
@@ -721,11 +810,13 @@ const server = createServer(async (req, res) => {
 
   if (req.method === 'POST' && p === '/api/skip') {
     const b = await body(req);
-    const h = db.prepare('SELECT any_days FROM habits WHERE id=? AND archived=0').get(b.habit_id);
+    const h = db.prepare('SELECT any_days, all_days FROM habits WHERE id=? AND archived=0').get(b.habit_id);
     if (!h) return json(res, 404, { error: 'habit not found' });
     const date = /^\d{4}-\d{2}-\d{2}$/.test(b.date || '') ? b.date : today();
     const any = h.any_days ? parseAnyDays(JSON.parse(h.any_days)) : null;
-    if (any && !any.includes(new Date(date + 'T12:00:00').getDay())) return json(res, 400, { error: 'not an allowed day for this habit' });
+    const all = h.all_days ? parseAnyDays(JSON.parse(h.all_days)) : null;
+    const sched = any || all;
+    if (sched && !sched.includes(new Date(date + 'T12:00:00').getDay())) return json(res, 400, { error: 'not an allowed day for this habit' });
     const existing = db.prepare('SELECT skip FROM checkins WHERE habit_id=? AND date=?').get(b.habit_id, date);
     db.prepare('DELETE FROM checkins WHERE habit_id=? AND date=?').run(b.habit_id, date);
     if (!(existing && existing.skip)) {
@@ -743,7 +834,8 @@ const server = createServer(async (req, res) => {
     const name = (b.name || '').trim();
     if (!name) return json(res, 400, { error: 'name required' });
     const any = parseAnyDays(b.any_days);
-    const r = db.prepare('INSERT INTO habits (name, emoji, any_days) VALUES (?, ?, ?)').run(name, (b.emoji||'').trim(), any ? JSON.stringify(any) : null);
+    const all = parseAnyDays(b.all_days);
+    const r = db.prepare('INSERT INTO habits (name, emoji, any_days, all_days) VALUES (?, ?, ?, ?)').run(name, (b.emoji||'').trim(), any ? JSON.stringify(any) : null, all ? JSON.stringify(all) : null);
     return json(res, 200, { ok: true, id: Number(r.lastInsertRowid) });
   }
 
