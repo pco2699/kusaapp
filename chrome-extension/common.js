@@ -19,6 +19,7 @@ async function request(path, { method = 'GET', body, settings } = {}) {
   const res = await fetch(settings.url + path, {
     method,
     headers,
+    cache: 'no-store',
     body: body !== undefined ? JSON.stringify(body) : undefined
   });
   if (res.status === 401) throw new Error('unauthorized');

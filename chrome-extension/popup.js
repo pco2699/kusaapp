@@ -2,6 +2,7 @@ import {
   getSettings, saveSettings, apiGet, apiPost,
   computeProgress, dueToday, dowOf, DEFAULT_URL
 } from './common.js';
+import { applyBadge, badgeViewFromState, UNCONFIGURED_VIEW, ERROR_VIEW } from './badge.js';
 
 const DAY_LABELS = ['Su', 'Mo', 'Tu', 'We', 'Th', 'Fr', 'Sa'];
 let settings = null;
@@ -21,6 +22,22 @@ function scheduleLabel(h) {
   return 'Daily';
 }
 
+// Paint the toolbar from the popup itself: this context is alive right now, so
+// the badge is guaranteed to be written and to match what the list shows. The
+// message additionally cancels any stale in-flight update in the service worker.
+async function pushBadge(view) {
+  try {
+    await applyBadge(view);
+  } catch (e) {
+    console.warn('badge update failed', e);
+  }
+  try {
+    await chrome.runtime.sendMessage({ type: 'state', view });
+  } catch (e) {
+    // service worker asleep or restarting; the badge is already painted
+  }
+}
+
 function setConn(text, cls) {
   const el = document.getElementById('connText');
   el.textContent = text;
@@ -38,14 +55,20 @@ async function load() {
   document.getElementById('emptyState').classList.add('hidden');
   document.getElementById('summaryText').textContent = '';
 
-  if (noKey) { setConn('Set up your server first', 'warn'); return; }
+  if (noKey) {
+    setConn('Set up your server first', 'warn');
+    await pushBadge(UNCONFIGURED_VIEW);
+    return;
+  }
 
   try {
     state = await apiGet(settings, '/api/state');
     setConn('Connected', 'ok');
     render();
+    await pushBadge(badgeViewFromState(state));
   } catch (e) {
     setConn(e.message === 'unauthorized' ? 'Invalid key' : 'Cannot reach server', 'err');
+    await pushBadge(ERROR_VIEW);
   }
 }
 
@@ -69,7 +92,6 @@ function render() {
     check.disabled = !isDue;
     check.addEventListener('change', async () => {
       await apiPost(settings, '/api/toggle', { habit_id: h.id, date: state.today });
-      chrome.runtime.sendMessage({ type: 'refresh' });
       await load();
     });
 
@@ -89,7 +111,6 @@ function render() {
     del.title = 'Delete';
     del.addEventListener('click', async () => {
       await apiPost(settings, '/api/habits', { op: 'delete', id: h.id });
-      chrome.runtime.sendMessage({ type: 'refresh' });
       await load();
     });
 
@@ -127,7 +148,6 @@ document.getElementById('addBtn').addEventListener('click', async () => {
   await apiPost(settings, '/api/habits', { op: 'create', name, any_days, all_days });
   document.getElementById('nameInput').value = '';
   document.getElementById('flexibleInput').checked = false;
-  chrome.runtime.sendMessage({ type: 'refresh' });
   await load();
 });
 
@@ -135,7 +155,6 @@ document.getElementById('saveBtn').addEventListener('click', async () => {
   const url = document.getElementById('urlInput').value.trim() || DEFAULT_URL;
   const key = document.getElementById('keyInput').value.trim();
   await saveSettings({ url, key });
-  chrome.runtime.sendMessage({ type: 'refresh' });
   await load();
 });
 

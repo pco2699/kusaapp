@@ -41,6 +41,17 @@ Server URL and token are entered in the popup's ⚙ Settings and stored in
 ## Files
 
 - `manifest.json` — MV3 (module service worker + `host_permissions`)
-- `background.js` — gauge rendering (OffscreenCanvas) + badge updates
+- `background.js` — periodic refresh + badge updates from the service worker
+- `badge.js` — gauge rendering (OffscreenCanvas) + badge painting, shared by
+  the service worker and the popup
 - `common.js` — settings, API calls, progress math (shared by background/popup)
 - `popup.html` / `popup.css` / `popup.js` — popup UI
+
+## When the toolbar refreshes
+
+The gauge and badge are repainted whenever the popup loads (so opening the popup
+always reconciles the toolbar with the server, even when the habits were checked
+off in the kusaapp web UI or on another device), on every popup action, on
+settings changes, every 5 minutes via an alarm, and at midnight. The popup paints
+the toolbar from the very state it just rendered, so the badge count and the
+`x/y done` line can never disagree.
