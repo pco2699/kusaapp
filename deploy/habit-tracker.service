@@ -1,0 +1,17 @@
+# systemd *user* unit. Install to ~/.config/systemd/user/habit-tracker.service,
+# then:
+#   systemctl --user daemon-reload
+#   systemctl --user enable --now habit-tracker
+#   sudo loginctl enable-linger "$USER"   # keep it running after you log out
+# Adjust ExecStart to your node binary (`command -v node`) and checkout path.
+[Unit]
+Description=Kusa habit tracker (node:sqlite, port 8090)
+After=network.target
+
+[Service]
+ExecStart=/usr/bin/node %h/apps/kusaapp/server.mjs
+Restart=always
+RestartSec=3
+
+[Install]
+WantedBy=default.target

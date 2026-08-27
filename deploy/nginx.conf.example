@@ -1,0 +1,21 @@
+# Example nginx vhost. Copy to /etc/nginx/sites-available/<your-domain>,
+# symlink into sites-enabled, `nginx -t && systemctl reload nginx`, then let
+# certbot add TLS and the http->https redirect:
+#
+#   sudo certbot --nginx -d <your-domain> --redirect
+#
+# The server binds 127.0.0.1 only, so this proxy is what makes it reachable.
+server {
+    listen 80;
+    listen [::]:80;
+    server_name habits.example.com;
+
+    location / {
+        proxy_pass http://127.0.0.1:8090;
+        proxy_set_header Host $host;
+        proxy_set_header X-Real-IP $remote_addr;
+        proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+        proxy_set_header X-Forwarded-Proto $scheme;
+        proxy_http_version 1.1;
+    }
+}

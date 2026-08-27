@@ -95,10 +95,32 @@ to 4× slower CPU on a 1.6 Mbps / 150 ms link:
 - Listens on `127.0.0.1` only — put a reverse proxy (nginx/caddy) in front for TLS/remote access.
 - `habits.db` (SQLite) is created next to `server.mjs` on first run.
 - Data lives in two tables: `habits` (with `any_days` JSON) and `checkins` (`date`, `skip`).
+- Day boundaries come from a fixed timezone in `server.mjs` (`TZ_FMT`), not the host clock,
+  so the box can sit in UTC without shifting what counts as "today". Set it to your timezone.
+
+### Behind a domain
+
+[`deploy/`](deploy/) has the two files that turn a checkout into a running site:
+
+1. `deploy/habit-tracker.service` — a systemd **user** unit. Point `ExecStart` at your node
+   binary and checkout, install it under `~/.config/systemd/user/`, then
+   `systemctl --user enable --now habit-tracker`. Run `sudo loginctl enable-linger "$USER"`
+   so it keeps running when you are not logged in.
+2. `deploy/nginx.conf.example` — a vhost proxying your domain to `127.0.0.1:8090`. Enable it,
+   reload nginx, then `sudo certbot --nginx -d <your-domain> --redirect` for TLS.
+
+Moving an existing instance is just the database: stop the old service, copy `habits.db`
+(and `config.json`, to keep the token that browsers and the extension already hold) to the
+new host, and start it there. Keeping the token means clients with the key in `localStorage`
+or in the extension's settings only need their base URL updated.
+
+> The token is the only thing standing between the open internet and your data once the
+> site is public — use a long random string, and prefer a private network (VPN/tailnet) if
+> you would rather not expose it at all.
 
 ## Agent skill
 
-This repo ships an agent skill (`skill/kusa-app/`) so an OpenClaw/Codex-style agent can operate the tracker for you (check in, report streaks, …). See `skill/habit-tracker/SKILL.md`.
+This repo ships an agent skill (`skill/kusa-app/`) so an OpenClaw/Codex-style agent can operate the tracker for you (check in, report streaks, …). See `skill/kusa-app/SKILL.md`.
 
 ## Chrome extension
 
