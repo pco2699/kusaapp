@@ -38,7 +38,10 @@ Weekdays are `0`=Sun … `6`=Sat. Checking in on a day the habit doesn't run ret
 
 ## Talking to it
 
-Base URL `http://127.0.0.1:8090`. Token lives in `config.json` — never print or commit it.
+Base URL is whatever this deployment answers on: `http://127.0.0.1:<port>` when the server
+runs on the same machine as you, otherwise the origin its reverse proxy serves. The server
+itself always binds `127.0.0.1`, so a remote instance is only ever reachable through that proxy.
+Token lives in `config.json` **on the server's host** — never print or commit it.
 Auth: `?key=<token>` or `Authorization: Bearer <token>`.
 
 | Call | Does |
@@ -54,12 +57,12 @@ Auth: `?key=<token>` or `Authorization: Bearer <token>`.
 ## Gotchas
 
 - **"I checked in on my phone but it's gone."** The PWA queues writes locally while offline and flushes on reconnect — have them reopen the app on a connection before treating it as lost data.
-- Don't inline the token in a shell one-liner; quoting mangles it. Read `config.json` from a small Node script and build URLs with `URL` + `searchParams`.
+- Don't inline the token in a shell one-liner; quoting mangles it. Read `config.json` from a small Node script and build URLs with `URL` + `searchParams`. If the server is on another host, keep a local copy of the base URL and token wherever you keep credentials — don't guess at `localhost`, it will just time out.
 - After editing `server.mjs`: `node --check server.mjs`, then check the *served* page script too — that HTML lives inside a JS template literal, so backslashes need doubling.
 - `habits.db` and `config.json` stay out of git.
 
 ## Running it
 
-systemd owns the server: `systemctl --user restart habit-tracker`, logs via `journalctl --user -u habit-tracker -n 50`.
+systemd owns the server: `systemctl --user restart habit-tracker`, logs via `journalctl --user -u habit-tracker -n 50` — **on whichever host runs it**, which is not necessarily the one you are on. For a remote deployment, prefix both with `ssh <host>`, and remember that editing `server.mjs` locally changes nothing until the file reaches that host.
 
 Never `pkill` the process. It was killed that way once and stayed down overnight — the unit reads a plain SIGTERM as a deliberate stop. (`Restart=always` now recovers it, but a manual `setsid node server.mjs &` still leaves an unsupervised copy that dies with its session.)
