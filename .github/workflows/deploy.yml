@@ -1,0 +1,80 @@
+name: Deploy
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+# One deploy at a time, and never cancel one halfway through an rsync.
+concurrency:
+  group: deploy
+  cancel-in-progress: false
+
+jobs:
+  test:
+    uses: ./.github/workflows/ci.yml
+
+  deploy:
+    needs: test
+    runs-on: ubuntu-latest
+    # Optional: create a "production" environment in the repo settings to require a
+    # manual approval before this job runs.
+    environment: production
+    env:
+      SSH_HOST: ${{ secrets.SSH_HOST }}
+      SSH_USER: ${{ secrets.SSH_USER }}
+      SSH_PORT: ${{ vars.SSH_PORT || '22' }}
+      DEPLOY_PATH: ${{ vars.DEPLOY_PATH || 'apps/kusaapp' }}
+      SERVICE_NAME: ${{ vars.SERVICE_NAME || 'habit-tracker' }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Load the deploy key
+        run: |
+          mkdir -p ~/.ssh && chmod 700 ~/.ssh
+          printf '%s\n' "${{ secrets.SSH_KEY }}" > ~/.ssh/id_deploy
+          chmod 600 ~/.ssh/id_deploy
+          # Pinned host key, so a hijacked DNS record cannot collect the deploy key.
+          printf '%s\n' "${{ secrets.SSH_KNOWN_HOSTS }}" > ~/.ssh/known_hosts
+          chmod 600 ~/.ssh/known_hosts
+          test -s ~/.ssh/known_hosts || { echo "SSH_KNOWN_HOSTS secret is empty"; exit 1; }
+
+      - name: Sync the checkout
+        # config.json and habits.db live only on the server: they hold the token and all
+        # the history, and --delete would otherwise wipe them on the first deploy.
+        run: |
+          rsync -az --delete \
+            -e "ssh -i ~/.ssh/id_deploy -p $SSH_PORT" \
+            --exclude '.git' \
+            --exclude '.github' \
+            --exclude 'config.json' \
+            --exclude 'habits.db' \
+            --exclude '*.log' \
+            ./ "$SSH_USER@$SSH_HOST:$DEPLOY_PATH/"
+
+      - name: Restart and health-check
+        run: |
+          ssh -i ~/.ssh/id_deploy -p "$SSH_PORT" "$SSH_USER@$SSH_HOST" \
+            "DEPLOY_PATH='$DEPLOY_PATH' SERVICE_NAME='$SERVICE_NAME' bash -s" <<'REMOTE'
+          set -euo pipefail
+          # `systemctl --user` over SSH needs to be pointed at the user's own bus.
+          export XDG_RUNTIME_DIR="/run/user/$(id -u)"
+          cd "$DEPLOY_PATH"
+
+          systemctl --user restart "$SERVICE_NAME"
+
+          # The port and token are whatever the box's own config.json says.
+          PORT=$(node -p "require('./config.json').port")
+          TOKEN=$(node -p "require('./config.json').token")
+          for i in $(seq 1 30); do
+            if curl -fsS -H "Authorization: Bearer $TOKEN" "http://127.0.0.1:$PORT/api/health" | grep -q '"ok":true'; then
+              echo "healthy on port $PORT"
+              exit 0
+            fi
+            sleep 1
+          done
+
+          echo "service did not come back healthy; last 40 log lines:" >&2
+          journalctl --user -u "$SERVICE_NAME" -n 40 --no-pager >&2 || true
+          exit 1
+          REMOTE

@@ -56,6 +56,24 @@ KUSA_CONFIG=/etc/kusa/work.json node server.mjs
 
 `port: 0` asks the OS for a free port; the startup line reports the one it actually bound.
 
+## Tests
+
+No test framework, matching the rest of the project — `node:test` and `node:assert` ship
+with Node:
+
+```bash
+node --test            # everything
+node --test test/logic.test.mjs
+```
+
+- `test/logic.test.mjs` — the streak, period and "done today" math, driven through
+  `getState(day)` so a test can ask about a specific weekday instead of waiting for one.
+- `test/api.test.mjs` — boots the real server on a free port and exercises auth, the
+  cookie rule, check-ins, skips, weekday enforcement, `days=` clipping, ETags and gzip.
+
+Each test gets its own temp directory holding a `config.json` and the SQLite file it
+names, so nothing touches your `habits.db`.
+
 ## API
 
 - `GET /api/state` — full state: habits with days, skips, streak/longest/total
@@ -100,6 +118,14 @@ to 4× slower CPU on a 1.6 Mbps / 150 ms link:
 | requests before first paint | 3 | 1 |
 | `GET /api/state` (p50) | 314 ms | 1.3 ms |
 
+## CI
+
+[`.github/workflows/ci.yml`](.github/workflows/ci.yml) runs on every push to `main` and
+every pull request: parses `server.mjs` and the extension scripts, runs the test suite on
+Node 22 and 24, and boots the server against an empty database to prove a first run still
+creates its schema and answers `/api/health`. Nothing to install — there are no
+dependencies to fetch.
+
 ## Deploy notes
 
 - Listens on `127.0.0.1` only — put a reverse proxy (nginx/caddy) in front for TLS/remote access.
@@ -118,6 +144,43 @@ to 4× slower CPU on a 1.6 Mbps / 150 ms link:
    so it keeps running when you are not logged in.
 2. `deploy/nginx.conf.example` — a vhost proxying your domain to `127.0.0.1:8090`. Enable it,
    reload nginx, then `sudo certbot --nginx -d <your-domain> --redirect` for TLS.
+
+### Continuous deployment
+
+[`.github/workflows/deploy.yml`](.github/workflows/deploy.yml) ships `main` to your box on
+every push: it runs CI first, rsyncs the checkout over SSH, restarts the systemd unit, and
+polls `/api/health` until the service answers — failing the run (with the last 40
+journal lines) if it does not come back.
+
+It assumes the systemd + nginx setup above is already in place. Configure it once:
+
+1. **Make a deploy key** and authorize it on the server:
+
+   ```bash
+   ssh-keygen -t ed25519 -f ~/.ssh/kusa-deploy -N '' -C 'github-actions'
+   ssh-copy-id -i ~/.ssh/kusa-deploy.pub <user>@<host>
+   ssh-keyscan -H <host>                     # copy this output for SSH_KNOWN_HOSTS
+   ```
+
+2. **Add the secrets** under *Settings → Secrets and variables → Actions*:
+
+   | Secret | Value |
+   | --- | --- |
+   | `SSH_HOST` | Your server's hostname or IP |
+   | `SSH_USER` | The user that owns the checkout and the systemd unit |
+   | `SSH_KEY` | Contents of the **private** key (`~/.ssh/kusa-deploy`) |
+   | `SSH_KNOWN_HOSTS` | The `ssh-keyscan` output — pinned, so a hijacked DNS record cannot collect the key |
+
+   Optional *variables* (same page, "Variables" tab) override the defaults:
+   `SSH_PORT` (`22`), `DEPLOY_PATH` (`apps/kusaapp`, relative to the user's home), and
+   `SERVICE_NAME` (`habit-tracker`).
+
+3. Create a **`production` environment** in the repo settings if you want a manual
+   approval before each deploy — the job already targets it.
+
+`config.json` and `habits.db` are excluded from the sync, so your token and your history
+stay on the server and survive `--delete`. The health check reads the port and token from
+the server's own `config.json`, so nothing about your instance is duplicated into GitHub.
 
 Moving an existing instance is just the database: stop the old service, copy `habits.db`
 (and `config.json`, to keep the token that browsers and the extension already hold) to the
