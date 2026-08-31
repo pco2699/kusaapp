@@ -148,34 +148,71 @@ dependencies to fetch.
 ### Continuous deployment
 
 [`.github/workflows/deploy.yml`](.github/workflows/deploy.yml) ships `main` to your box on
-every push: it runs CI first, rsyncs the checkout over SSH, restarts the systemd unit, and
-polls `/api/health` until the service answers — failing the run (with the last 40
-journal lines) if it does not come back.
+every push: it runs CI first, joins your tailnet, rsyncs the checkout over **Tailscale
+SSH**, restarts the systemd unit, and polls `/api/health` until the service answers —
+failing the run (with the last 40 journal lines) if it does not.
 
-It assumes the systemd + nginx setup above is already in place. Configure it once:
+Reaching the server over Tailscale means there is no deploy key to install and no SSH
+port to expose: the tunnel is authenticated by WireGuard and the login is authorized by
+your tailnet's SSH ACL. It assumes the systemd + nginx setup above is already in place,
+plus `rsync`, `curl` and `node` on the server.
 
-1. **Make a deploy key** and authorize it on the server:
+Configure it once:
+
+1. **Turn on Tailscale SSH on the VPS**, and tag it so an ACL rule can name it:
 
    ```bash
-   ssh-keygen -t ed25519 -f ~/.ssh/kusa-deploy -N '' -C 'github-actions'
-   ssh-copy-id -i ~/.ssh/kusa-deploy.pub <user>@<host>
-   ssh-keyscan -H <host>                     # copy this output for SSH_KNOWN_HOSTS
+   sudo tailscale up --ssh --advertise-tags=tag:server
    ```
 
-2. **Add the secrets** under *Settings → Secrets and variables → Actions*:
+   Tagging transfers the node from you to the tag (which is what stops its key from
+   expiring), so this re-authenticates the machine. If you would rather leave it
+   untagged, skip the tag and use your own login as the ACL's `dst` instead —
+   `"dst": ["you@example.com"]`.
+
+2. **Allow CI to SSH in**, in your [tailnet policy file](https://login.tailscale.com/admin/acls):
+
+   ```jsonc
+   {
+     "tagOwners": {
+       "tag:ci":     ["autogroup:admin"],
+       "tag:server": ["autogroup:admin"],
+     },
+     "ssh": [
+       {
+         // "check" would demand an interactive re-auth, which no CI run can satisfy.
+         "action": "accept",
+         "src":    ["tag:ci"],
+         "dst":    ["tag:server"],
+         "users":  ["autogroup:nonroot"],
+       },
+     ],
+   }
+   ```
+
+3. **Create an OAuth client** at *Settings → OAuth clients* with the `auth_keys` write
+   scope and `tag:ci` attached, then add its two halves as repository **secrets**:
 
    | Secret | Value |
    | --- | --- |
-   | `SSH_HOST` | Your server's hostname or IP |
-   | `SSH_USER` | The user that owns the checkout and the systemd unit |
-   | `SSH_KEY` | Contents of the **private** key (`~/.ssh/kusa-deploy`) |
-   | `SSH_KNOWN_HOSTS` | The `ssh-keyscan` output — pinned, so a hijacked DNS record cannot collect the key |
+   | `TS_OAUTH_CLIENT_ID` | The OAuth client ID |
+   | `TS_OAUTH_SECRET` | The OAuth client secret |
 
-   Optional *variables* (same page, "Variables" tab) override the defaults:
-   `SSH_PORT` (`22`), `DEPLOY_PATH` (`apps/kusaapp`, relative to the user's home), and
-   `SERVICE_NAME` (`habit-tracker`).
+   Each run joins the tailnet as a short-lived `tag:ci` node and leaves when it finishes,
+   so nothing long-lived is added to your tailnet.
 
-3. Create a **`production` environment** in the repo settings if you want a manual
+4. **Point it at the box** with repository **variables** (*Settings → Secrets and
+   variables → Actions → Variables*). These are not credentials — the ACL is what grants
+   access — so keeping them readable makes a failed deploy far easier to read:
+
+   | Variable | Required | Default |
+   | --- | --- | --- |
+   | `DEPLOY_HOST` | yes | — (the VPS's MagicDNS name, e.g. `vps`) |
+   | `DEPLOY_USER` | yes | — (the user owning the checkout and the systemd unit) |
+   | `DEPLOY_PATH` | no | `apps/kusaapp`, relative to that user's home |
+   | `SERVICE_NAME` | no | `habit-tracker` |
+
+5. Create a **`production` environment** in the repo settings if you want a manual
    approval before each deploy — the job already targets it.
 
 `config.json` and `habits.db` are excluded from the sync, so your token and your history

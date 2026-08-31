@@ -21,40 +21,50 @@ jobs:
     # manual approval before this job runs.
     environment: production
     env:
-      SSH_HOST: ${{ secrets.SSH_HOST }}
-      SSH_USER: ${{ secrets.SSH_USER }}
-      SSH_PORT: ${{ vars.SSH_PORT || '22' }}
+      DEPLOY_HOST: ${{ vars.DEPLOY_HOST }}
+      DEPLOY_USER: ${{ vars.DEPLOY_USER }}
       DEPLOY_PATH: ${{ vars.DEPLOY_PATH || 'apps/kusaapp' }}
       SERVICE_NAME: ${{ vars.SERVICE_NAME || 'habit-tracker' }}
+      # The server is reached over Tailscale SSH: the tunnel is already mutually
+      # authenticated by WireGuard and the login is authorized by the tailnet's SSH ACL,
+      # so there is no key to install here. The host key is minted by tailscaled on the
+      # far side and there is nothing stable for CI to pin, hence the relaxed checking.
+      SSH_OPTS: -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -o LogLevel=ERROR
     steps:
       - uses: actions/checkout@v4
 
-      - name: Load the deploy key
+      - name: Check the deploy target is configured
         run: |
-          mkdir -p ~/.ssh && chmod 700 ~/.ssh
-          printf '%s\n' "${{ secrets.SSH_KEY }}" > ~/.ssh/id_deploy
-          chmod 600 ~/.ssh/id_deploy
-          # Pinned host key, so a hijacked DNS record cannot collect the deploy key.
-          printf '%s\n' "${{ secrets.SSH_KNOWN_HOSTS }}" > ~/.ssh/known_hosts
-          chmod 600 ~/.ssh/known_hosts
-          test -s ~/.ssh/known_hosts || { echo "SSH_KNOWN_HOSTS secret is empty"; exit 1; }
+          : "${DEPLOY_HOST:?set the DEPLOY_HOST repository variable to the VPS's MagicDNS name}"
+          : "${DEPLOY_USER:?set the DEPLOY_USER repository variable to the login user on the VPS}"
+
+      - name: Join the tailnet
+        uses: tailscale/github-action@v4
+        with:
+          oauth-client-id: ${{ secrets.TS_OAUTH_CLIENT_ID }}
+          oauth-secret: ${{ secrets.TS_OAUTH_SECRET }}
+          tags: tag:ci
+          version: latest
+          hostname: gha-kusa-deploy
+          # Fail here, with a clear message, rather than inside rsync.
+          ping: ${{ vars.DEPLOY_HOST }}
 
       - name: Sync the checkout
         # config.json and habits.db live only on the server: they hold the token and all
         # the history, and --delete would otherwise wipe them on the first deploy.
         run: |
           rsync -az --delete \
-            -e "ssh -i ~/.ssh/id_deploy -p $SSH_PORT" \
+            -e "ssh $SSH_OPTS" \
             --exclude '.git' \
             --exclude '.github' \
             --exclude 'config.json' \
             --exclude 'habits.db' \
             --exclude '*.log' \
-            ./ "$SSH_USER@$SSH_HOST:$DEPLOY_PATH/"
+            ./ "$DEPLOY_USER@$DEPLOY_HOST:$DEPLOY_PATH/"
 
       - name: Restart and health-check
         run: |
-          ssh -i ~/.ssh/id_deploy -p "$SSH_PORT" "$SSH_USER@$SSH_HOST" \
+          ssh $SSH_OPTS "$DEPLOY_USER@$DEPLOY_HOST" \
             "DEPLOY_PATH='$DEPLOY_PATH' SERVICE_NAME='$SERVICE_NAME' bash -s" <<'REMOTE'
           set -euo pipefail
           # `systemctl --user` over SSH needs to be pointed at the user's own bus.
