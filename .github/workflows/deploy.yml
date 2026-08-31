@@ -20,6 +20,13 @@ jobs:
     # Optional: create a "production" environment in the repo settings to require a
     # manual approval before this job runs.
     environment: production
+    # The tailnet login below is workload identity federation: GitHub mints a short-lived
+    # OIDC token for this job and Tailscale trades it for an ephemeral node, so there is no
+    # client secret to store or rotate. Naming a `permissions` block drops everything else
+    # to none, hence spelling out the read that checkout still needs.
+    permissions:
+      contents: read
+      id-token: write
     env:
       DEPLOY_HOST: ${{ vars.DEPLOY_HOST }}
       DEPLOY_USER: ${{ vars.DEPLOY_USER }}
@@ -44,11 +51,17 @@ jobs:
           fi
 
       - name: Join the tailnet
+        # Because this job runs in the `production` environment, GitHub's `sub` claim is
+        # `repo:pco2699/kusaapp:environment:production`. That is what the federated
+        # identity's Subject must be set to, and it is why no other workflow in the repo
+        # can borrow the tailnet. Neither value below is actually a secret; they live in
+        # secrets so the tailnet's shape stays out of public build logs.
         uses: tailscale/github-action@v4
         with:
           oauth-client-id: ${{ secrets.TS_OAUTH_CLIENT_ID }}
-          oauth-secret: ${{ secrets.TS_OAUTH_SECRET }}
+          audience: ${{ secrets.TS_AUDIENCE }}
           tags: tag:ci
+          # Federated identity needs tailscale 1.90.1 or newer.
           version: latest
           hostname: gha-kusa-deploy
           # Fail here, with a clear message, rather than inside rsync.
