@@ -170,7 +170,7 @@ Configure it once:
    untagged, skip the tag and use your own login as the ACL's `dst` instead —
    `"dst": ["you@example.com"]`.
 
-2. **Allow CI to SSH in**, in your [tailnet policy file](https://login.tailscale.com/admin/acls):
+2. **Allow CI to SSH in**, in your [tailnet policy file](https://console.tailscale.com/admin/acls):
 
    ```jsonc
    {
@@ -190,16 +190,33 @@ Configure it once:
    }
    ```
 
-3. **Create an OAuth client** at *Settings → OAuth clients* with the `auth_keys` write
-   scope and `tag:ci` attached, then add its two halves as repository **secrets**:
+   This is a fragment to merge into your policy file. A default tailnet also carries an
+   allow-all `acls` rule, which is what lets the SSH connection reach port 22 in the first
+   place; if you have narrowed that, give `tag:ci` a rule to `tag:server` on port 22 too.
+
+3. **Create a federated identity** at *Trust credentials → Credential → OpenID Connect*
+   — the page older guides call *Settings → OAuth clients*. Pick **GitHub Actions** as the
+   issuer, give it the **Devices → Core → Write** and **Keys → Auth Keys → Write** scopes,
+   attach `tag:ci`, and set the subject to:
+
+   ```
+   repo:<your-user>/<your-repo>:environment:production
+   ```
+
+   Because the deploy job declares `environment: production`, that is the `sub` claim
+   GitHub puts in the token it mints for the job — so pinning it here means no other
+   workflow, branch or pull request in the repo can reach your tailnet. Then add:
 
    | Secret | Value |
    | --- | --- |
-   | `TS_OAUTH_CLIENT_ID` | The OAuth client ID |
-   | `TS_OAUTH_SECRET` | The OAuth client secret |
+   | `TS_OAUTH_CLIENT_ID` | The credential's Client ID |
+   | `TS_AUDIENCE` | The credential's Audience, `api.tailscale.com/<client ID>` |
 
-   Each run joins the tailnet as a short-lived `tag:ci` node and leaves when it finishes,
-   so nothing long-lived is added to your tailnet.
+   Neither value is genuinely secret; they live in **secrets** only to keep the shape of
+   your tailnet out of public build logs. There is no client secret to store or rotate at
+   all — GitHub mints a short-lived OIDC token per run and Tailscale trades it for an
+   ephemeral `tag:ci` node that leaves when the run finishes, so nothing long-lived is
+   added to your tailnet or to this repo.
 
 4. **Point it at the box** with repository **variables** (*Settings → Secrets and
    variables → Actions → Variables*). These are not credentials — the ACL is what grants
@@ -213,7 +230,9 @@ Configure it once:
    | `SERVICE_NAME` | no | `habit-tracker` |
 
 5. Create a **`production` environment** in the repo settings if you want a manual
-   approval before each deploy — the job already targets it.
+   approval before each deploy — the job already targets it. You do not need to create it
+   just to make step 3 work: GitHub records the environment in the token's `sub` claim
+   whether or not the repo has one configured.
 
 `config.json` and `habits.db` are excluded from the sync, so your token and your history
 stay on the server and survive `--delete`. The health check reads the port and token from
