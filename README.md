@@ -45,6 +45,16 @@ All settings live in `config.json` (copy from `config.example.json`):
 | `port` | `8090` | TCP port to listen on |
 | `token` | *(no default)* | Access key required by every authenticated request — set a long random string. Passed as `?key=…` or `Authorization: Bearer` |
 | `lang` | `"ja"` | UI language: `"ja"` (Japanese) or `"en"` (English). Also sets the `<html lang>` and date formatting |
+| `db` | `habits.db` *(next to `server.mjs`)* | Path to the SQLite file, resolved relative to the config file |
+
+Set `KUSA_CONFIG` to run against a config file somewhere else — that is how one checkout
+can serve several instances, and how the tests keep off your real database:
+
+```bash
+KUSA_CONFIG=/etc/kusa/work.json node server.mjs
+```
+
+`port: 0` asks the OS for a free port; the startup line reports the one it actually bound.
 
 ## API
 
@@ -93,7 +103,7 @@ to 4× slower CPU on a 1.6 Mbps / 150 ms link:
 ## Deploy notes
 
 - Listens on `127.0.0.1` only — put a reverse proxy (nginx/caddy) in front for TLS/remote access.
-- `habits.db` (SQLite) is created next to `server.mjs` on first run.
+- `habits.db` (SQLite) is created next to `server.mjs` on first run, or wherever `db` points.
 - Data lives in two tables: `habits` (with `any_days` JSON) and `checkins` (`date`, `skip`).
 - Day boundaries come from a fixed timezone in `server.mjs` (`TZ_FMT`), not the host clock,
   so the box can sit in UTC without shifting what counts as "today". Set it to your timezone.
