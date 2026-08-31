@@ -231,8 +231,12 @@ function streakPeriods(satKeys, skipKeys, todayStr, runs, allowed) {
   }
   return n;
 }
-function longestPeriods(keys) {
-  const arr = [...keys].map(k => { const p = k.split(':'); return Number(p[0]) * 8 + Number(p[1]); }).sort((a, b) => a - b);
+// Periods are numbered densely — `runsPerWeek` slots per week — so that the last period
+// of one week and the first of the next come out adjacent. Spacing them any wider (a
+// fixed 8, say) leaves a gap at every week boundary, and a habit with one period per
+// week could then never show a longest run above 1.
+function longestPeriods(keys, runsPerWeek) {
+  const arr = [...keys].map(k => { const p = k.split(':'); return Number(p[0]) * runsPerWeek + Number(p[1]); }).sort((a, b) => a - b);
   let best = 0, cur = 0, prev = null;
   for (const o of arr) { cur = (prev !== null && o === prev + 1) ? cur + 1 : 1; prev = o; if (cur > best) best = cur; }
   return best;
@@ -319,7 +323,7 @@ function getState(t = today()) {
       out.push({
         id: h.id, name: h.name, emoji: h.emoji, any_days: any, all_days: null, total: checked.length,
         streak: streakPeriods(satKeys, skipKeys, t, runs, allowed),
-        longest: longestPeriods(new Set([...satKeys, ...skipKeys])),
+        longest: longestPeriods(new Set([...satKeys, ...skipKeys]), runs.length),
         days: checked, skips,
         done_now: todayPi ? satKeys.has(todayPi.key) : true
       });
