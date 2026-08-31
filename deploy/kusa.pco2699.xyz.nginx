@@ -1,0 +1,25 @@
+# The real vhost for kusa.pco2699.xyz, as it looked *before* certbot touched it.
+# This is the file you install and then hand to certbot:
+#
+#   sudo cp deploy/kusa.pco2699.xyz.nginx /etc/nginx/sites-available/kusa.pco2699.xyz
+#   sudo ln -s ../sites-available/kusa.pco2699.xyz /etc/nginx/sites-enabled/
+#   sudo nginx -t && sudo systemctl reload nginx
+#   sudo certbot --nginx -d kusa.pco2699.xyz --redirect
+#
+# Certbot rewrites the installed copy in place, adding the 443 server block and
+# turning this one into a 301 redirect. Do NOT copy this file back over a vhost
+# certbot has already managed: that silently removes TLS.
+server {
+    listen 80;
+    listen [::]:80;
+    server_name kusa.pco2699.xyz;
+
+    location / {
+        proxy_pass http://127.0.0.1:8090;
+        proxy_set_header Host $host;
+        proxy_set_header X-Real-IP $remote_addr;
+        proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+        proxy_set_header X-Forwarded-Proto $scheme;
+        proxy_http_version 1.1;
+    }
+}
