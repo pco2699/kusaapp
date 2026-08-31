@@ -1,0 +1,58 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  # Called by deploy.yml, so a deploy always runs the same checks.
+  workflow_call:
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        # 22 is the floor (node:sqlite landed in 22.5); 24 is what a fresh box gets.
+        node: ['22', '24']
+    name: test (node ${{ matrix.node }})
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: ${{ matrix.node }}
+
+      - name: Parse every source file
+        run: |
+          node --check server.mjs
+          for f in chrome-extension/*.js; do node --check "$f"; done
+
+      - name: Validate the JSON that ships
+        run: |
+          for f in config.example.json chrome-extension/manifest.json; do
+            node -e "JSON.parse(require('node:fs').readFileSync('$f','utf8'))" || exit 1
+          done
+
+      - name: Test
+        run: node --test
+
+      - name: Boot the server against a fresh database
+        # Catches anything that only breaks on a first run: schema creation, the
+        # startup bundles, binding the port.
+        run: |
+          dir=$(mktemp -d)
+          printf '{"port":8090,"token":"smoke-token","lang":"ja","db":"habits.db"}' > "$dir/config.json"
+          KUSA_CONFIG="$dir/config.json" node server.mjs &
+          pid=$!
+          for i in $(seq 1 50); do
+            curl -fsS "http://127.0.0.1:8090/api/health?key=smoke-token" && break
+            sleep 0.2
+          done
+          curl -fsS "http://127.0.0.1:8090/api/health?key=smoke-token" | grep -q '"ok":true'
+          test -s "$dir/habits.db" || { echo "no database was created"; exit 1; }
+          kill $pid

@@ -45,6 +45,34 @@ All settings live in `config.json` (copy from `config.example.json`):
 | `port` | `8090` | TCP port to listen on |
 | `token` | *(no default)* | Access key required by every authenticated request — set a long random string. Passed as `?key=…` or `Authorization: Bearer` |
 | `lang` | `"ja"` | UI language: `"ja"` (Japanese) or `"en"` (English). Also sets the `<html lang>` and date formatting |
+| `db` | `habits.db` *(next to `server.mjs`)* | Path to the SQLite file, resolved relative to the config file |
+
+Set `KUSA_CONFIG` to run against a config file somewhere else — that is how one checkout
+can serve several instances, and how the tests keep off your real database:
+
+```bash
+KUSA_CONFIG=/etc/kusa/work.json node server.mjs
+```
+
+`port: 0` asks the OS for a free port; the startup line reports the one it actually bound.
+
+## Tests
+
+No test framework, matching the rest of the project — `node:test` and `node:assert` ship
+with Node:
+
+```bash
+node --test            # everything
+node --test test/logic.test.mjs
+```
+
+- `test/logic.test.mjs` — the streak, period and "done today" math, driven through
+  `getState(day)` so a test can ask about a specific weekday instead of waiting for one.
+- `test/api.test.mjs` — boots the real server on a free port and exercises auth, the
+  cookie rule, check-ins, skips, weekday enforcement, `days=` clipping, ETags and gzip.
+
+Each test gets its own temp directory holding a `config.json` and the SQLite file it
+names, so nothing touches your `habits.db`.
 
 ## API
 
@@ -90,10 +118,18 @@ to 4× slower CPU on a 1.6 Mbps / 150 ms link:
 | requests before first paint | 3 | 1 |
 | `GET /api/state` (p50) | 314 ms | 1.3 ms |
 
+## CI
+
+[`.github/workflows/ci.yml`](.github/workflows/ci.yml) runs on every push to `main` and
+every pull request: parses `server.mjs` and the extension scripts, runs the test suite on
+Node 22 and 24, and boots the server against an empty database to prove a first run still
+creates its schema and answers `/api/health`. Nothing to install — there are no
+dependencies to fetch.
+
 ## Deploy notes
 
 - Listens on `127.0.0.1` only — put a reverse proxy (nginx/caddy) in front for TLS/remote access.
-- `habits.db` (SQLite) is created next to `server.mjs` on first run.
+- `habits.db` (SQLite) is created next to `server.mjs` on first run, or wherever `db` points.
 - Data lives in two tables: `habits` (with `any_days` JSON) and `checkins` (`date`, `skip`).
 - Day boundaries come from a fixed timezone in `server.mjs` (`TZ_FMT`), not the host clock,
   so the box can sit in UTC without shifting what counts as "today". Set it to your timezone.
@@ -108,6 +144,80 @@ to 4× slower CPU on a 1.6 Mbps / 150 ms link:
    so it keeps running when you are not logged in.
 2. `deploy/nginx.conf.example` — a vhost proxying your domain to `127.0.0.1:8090`. Enable it,
    reload nginx, then `sudo certbot --nginx -d <your-domain> --redirect` for TLS.
+
+### Continuous deployment
+
+[`.github/workflows/deploy.yml`](.github/workflows/deploy.yml) ships `main` to your box on
+every push: it runs CI first, joins your tailnet, rsyncs the checkout over **Tailscale
+SSH**, restarts the systemd unit, and polls `/api/health` until the service answers —
+failing the run (with the last 40 journal lines) if it does not.
+
+Reaching the server over Tailscale means there is no deploy key to install and no SSH
+port to expose: the tunnel is authenticated by WireGuard and the login is authorized by
+your tailnet's SSH ACL. It assumes the systemd + nginx setup above is already in place,
+plus `rsync`, `curl` and `node` on the server.
+
+Configure it once:
+
+1. **Turn on Tailscale SSH on the VPS**, and tag it so an ACL rule can name it:
+
+   ```bash
+   sudo tailscale up --ssh --advertise-tags=tag:server
+   ```
+
+   Tagging transfers the node from you to the tag (which is what stops its key from
+   expiring), so this re-authenticates the machine. If you would rather leave it
+   untagged, skip the tag and use your own login as the ACL's `dst` instead —
+   `"dst": ["you@example.com"]`.
+
+2. **Allow CI to SSH in**, in your [tailnet policy file](https://login.tailscale.com/admin/acls):
+
+   ```jsonc
+   {
+     "tagOwners": {
+       "tag:ci":     ["autogroup:admin"],
+       "tag:server": ["autogroup:admin"],
+     },
+     "ssh": [
+       {
+         // "check" would demand an interactive re-auth, which no CI run can satisfy.
+         "action": "accept",
+         "src":    ["tag:ci"],
+         "dst":    ["tag:server"],
+         "users":  ["autogroup:nonroot"],
+       },
+     ],
+   }
+   ```
+
+3. **Create an OAuth client** at *Settings → OAuth clients* with the `auth_keys` write
+   scope and `tag:ci` attached, then add its two halves as repository **secrets**:
+
+   | Secret | Value |
+   | --- | --- |
+   | `TS_OAUTH_CLIENT_ID` | The OAuth client ID |
+   | `TS_OAUTH_SECRET` | The OAuth client secret |
+
+   Each run joins the tailnet as a short-lived `tag:ci` node and leaves when it finishes,
+   so nothing long-lived is added to your tailnet.
+
+4. **Point it at the box** with repository **variables** (*Settings → Secrets and
+   variables → Actions → Variables*). These are not credentials — the ACL is what grants
+   access — so keeping them readable makes a failed deploy far easier to read:
+
+   | Variable | Required | Default |
+   | --- | --- | --- |
+   | `DEPLOY_HOST` | yes | — (the VPS's MagicDNS name, e.g. `vps`) |
+   | `DEPLOY_USER` | yes | — (the user owning the checkout and the systemd unit) |
+   | `DEPLOY_PATH` | no | `apps/kusaapp`, relative to that user's home |
+   | `SERVICE_NAME` | no | `habit-tracker` |
+
+5. Create a **`production` environment** in the repo settings if you want a manual
+   approval before each deploy — the job already targets it.
+
+`config.json` and `habits.db` are excluded from the sync, so your token and your history
+stay on the server and survive `--delete`. The health check reads the port and token from
+the server's own `config.json`, so nothing about your instance is duplicated into GitHub.
 
 Moving an existing instance is just the database: stop the old service, copy `habits.db`
 (and `config.json`, to keep the token that browsers and the extension already hold) to the

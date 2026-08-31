@@ -4,17 +4,22 @@
 // v6 (2026-08-24): any-of-weekday habits, PWA + offline queue
 import { DatabaseSync } from 'node:sqlite';
 import { createServer } from 'node:http';
-import { readFileSync } from 'node:fs';
+import { readFileSync, realpathSync } from 'node:fs';
 import { join, dirname } from 'node:path';
-import { fileURLToPath } from 'node:url';
+import { fileURLToPath, pathToFileURL } from 'node:url';
 import { createHash } from 'node:crypto';
 import { gzipSync, brotliCompressSync, constants as ZC } from 'node:zlib';
 
 const ROOT = dirname(fileURLToPath(import.meta.url));
-const CONFIG = JSON.parse(readFileSync(join(ROOT, 'config.json'), 'utf8'));
+// KUSA_CONFIG points the process at a config file other than ./config.json, so one
+// checkout can run several instances (and so the tests can run against their own).
+const CONFIG_PATH = process.env.KUSA_CONFIG || join(ROOT, 'config.json');
+const CONFIG = JSON.parse(readFileSync(CONFIG_PATH, 'utf8'));
 const { port, token, lang } = CONFIG;
 const LANG = lang === 'en' ? 'en' : 'ja';
-const DB_PATH = join(ROOT, 'habits.db');
+// `db` is resolved against the config file, so a config elsewhere keeps its database
+// beside it rather than in the checkout.
+const DB_PATH = CONFIG.db ? join(dirname(CONFIG_PATH), CONFIG.db) : join(ROOT, 'habits.db');
 
 const db = new DatabaseSync(DB_PATH);
 db.exec(`
@@ -157,12 +162,14 @@ function parseAnyDays(v) {
 }
 
 // ---------- daily streak ----------
-function streakFor(daysSet) {
-  let d = new Date();
-  const fmt = (dt) => TZ_FMT.format(dt);
-  if (!daysSet.has(fmt(d))) d.setDate(d.getDate() - 1);
+// Anchored on noon of the reference day and stepped with dateFmt, like the scheduled and
+// period walks below: stepping a Date by a day and re-formatting it in a *different*
+// timezone can land twice on the same calendar day across a DST shift.
+function streakFor(daysSet, t) {
+  const d = new Date(t + 'T12:00:00');
+  if (!daysSet.has(dateFmt(d))) d.setDate(d.getDate() - 1);
   let n = 0;
-  while (daysSet.has(fmt(d))) { n++; d.setDate(d.getDate() - 1); }
+  while (daysSet.has(dateFmt(d))) { n++; d.setDate(d.getDate() - 1); }
   return n;
 }
 function longestFor(daysSet) {
@@ -224,8 +231,12 @@ function streakPeriods(satKeys, skipKeys, todayStr, runs, allowed) {
   }
   return n;
 }
-function longestPeriods(keys) {
-  const arr = [...keys].map(k => { const p = k.split(':'); return Number(p[0]) * 8 + Number(p[1]); }).sort((a, b) => a - b);
+// Periods are numbered densely — `runsPerWeek` slots per week — so that the last period
+// of one week and the first of the next come out adjacent. Spacing them any wider (a
+// fixed 8, say) leaves a gap at every week boundary, and a habit with one period per
+// week could then never show a longest run above 1.
+function longestPeriods(keys, runsPerWeek) {
+  const arr = [...keys].map(k => { const p = k.split(':'); return Number(p[0]) * runsPerWeek + Number(p[1]); }).sort((a, b) => a - b);
   let best = 0, cur = 0, prev = null;
   for (const o of arr) { cur = (prev !== null && o === prev + 1) ? cur + 1 : 1; prev = o; if (cur > best) best = cur; }
   return best;
@@ -271,10 +282,11 @@ const Q_SKIP_ADD = db.prepare('INSERT INTO checkins (habit_id, date, skip) VALUE
 const Q_HABIT_ARCHIVE = db.prepare('UPDATE habits SET archived=1 WHERE id=?');
 const Q_HABIT_ADD = db.prepare('INSERT INTO habits (name, emoji, any_days, all_days) VALUES (?, ?, ?, ?)');
 
-function getState() {
+// `t` is the day to report on ('YYYY-MM-DD'); it defaults to today and is passed
+// explicitly by the tests, which need to ask about a specific weekday.
+function getState(t = today()) {
   const habits = Q_HABITS.all();
   const out = [];
-  const t = today();
   // One scan of checkins bucketed by habit, instead of a query per habit.
   const byHabit = new Map();
   for (const h of habits) byHabit.set(h.id, { checked: [], skips: [] });
@@ -303,25 +315,23 @@ function getState() {
       const runs = weekRuns(any);
       const satKeys = new Set(checked.map(ds => { const pi = periodInfo(ds, runs); return pi && pi.key; }).filter(Boolean));
       const skipKeys = new Set(skips.map(ds => { const pi = periodInfo(ds, runs); return pi && pi.key; }).filter(Boolean));
-      // done_now: the period relevant to today = first allowed day walking back <= 7 days
-      let relKey = null;
-      const d = new Date(t + 'T12:00:00');
-      for (let i = 0; i < 7; i++) {
-        if (allowed.has(d.getDay())) { const pi = periodInfo(dateFmt(d), runs); relKey = pi && pi.key; break; }
-        d.setDate(d.getDate() - 1);
-      }
+      // done_now: only the period today itself falls in. On a weekday the habit isn't
+      // scheduled for there is nothing to do, so it counts as done rather than dragging
+      // the day's count down with a period that closed days ago — the same way an
+      // all-of-weekday habit is done_now on a day it isn't scheduled.
+      const todayPi = allowed.has(new Date(t + 'T12:00:00').getDay()) ? periodInfo(t, runs) : null;
       out.push({
         id: h.id, name: h.name, emoji: h.emoji, any_days: any, all_days: null, total: checked.length,
         streak: streakPeriods(satKeys, skipKeys, t, runs, allowed),
-        longest: longestPeriods(new Set([...satKeys, ...skipKeys])),
+        longest: longestPeriods(new Set([...satKeys, ...skipKeys]), runs.length),
         days: checked, skips,
-        done_now: relKey ? satKeys.has(relKey) : false
+        done_now: todayPi ? satKeys.has(todayPi.key) : true
       });
     } else {
       const union = new Set([...checked, ...skips]);
       out.push({
         id: h.id, name: h.name, emoji: h.emoji, any_days: null, all_days: null, total: checked.length,
-        streak: streakFor(union), longest: longestFor(union),
+        streak: streakFor(union, t), longest: longestFor(union),
         days: checked, skips, done_now: checked.includes(t)
       });
     }
@@ -363,7 +373,7 @@ function sliceState(state, days) {
 function stateEntry() {
   const t = today();
   if (stateCache && stateCache.day === t) return stateCache;
-  const state = getState();
+  const state = getState(t);
   stateCache = {
     day: t,
     state,
@@ -1360,4 +1370,19 @@ const server = createServer(async (req, res) => {
   json(res, 404, { error: 'not found' });
 });
 
-server.listen(port, '127.0.0.1', () => console.log(`habit-tracker listening on 127.0.0.1:${port}`));
+// Listen only when run directly; importing the file (the tests do) gets the exports
+// below without binding a port. import.meta.url is the resolved path, so argv[1] has to
+// go through realpath too or a symlinked ExecStart would never start the server.
+function isMain() {
+  try { return pathToFileURL(realpathSync(process.argv[1])).href === import.meta.url; }
+  catch { return false; }
+}
+if (isMain()) {
+  // Port 0 asks the OS for a free one, so report the port actually bound rather than
+  // the one that was configured.
+  server.listen(port, '127.0.0.1', () => console.log(`habit-tracker listening on 127.0.0.1:${server.address().port}`));
+}
+
+// The test seam. server.mjs stays the whole app in one file, so the tests reach the
+// date math and the database handle through here rather than a second module.
+export { db, today, parseAnyDays, getState, sliceState, invalidateState, weekRuns, periodInfo };
