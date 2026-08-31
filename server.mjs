@@ -303,12 +303,13 @@ function getState(t = today()) {
     if (all) {
       const allowed = new Set(all);
       const union = new Set([...checked, ...skips]);
+      const due = allowed.has(new Date(t + 'T12:00:00').getDay());
       out.push({
         id: h.id, name: h.name, emoji: h.emoji, any_days: null, all_days: all, total: checked.length,
         streak: streakScheduled(union, allowed, t),
         longest: longestScheduled(union, allowed, t),
-        days: checked, skips,
-        done_now: allowed.has(new Date(t + 'T12:00:00').getDay()) ? checked.includes(t) : true
+        days: checked, skips, due_now: due,
+        done_now: due ? checked.includes(t) : true
       });
     } else if (any) {
       const allowed = new Set(any);
@@ -319,12 +320,13 @@ function getState(t = today()) {
       // scheduled for there is nothing to do, so it counts as done rather than dragging
       // the day's count down with a period that closed days ago — the same way an
       // all-of-weekday habit is done_now on a day it isn't scheduled.
-      const todayPi = allowed.has(new Date(t + 'T12:00:00').getDay()) ? periodInfo(t, runs) : null;
+      const due = allowed.has(new Date(t + 'T12:00:00').getDay());
+      const todayPi = due ? periodInfo(t, runs) : null;
       out.push({
         id: h.id, name: h.name, emoji: h.emoji, any_days: any, all_days: null, total: checked.length,
         streak: streakPeriods(satKeys, skipKeys, t, runs, allowed),
         longest: longestPeriods(new Set([...satKeys, ...skipKeys]), runs.length),
-        days: checked, skips,
+        days: checked, skips, due_now: due,
         done_now: todayPi ? satKeys.has(todayPi.key) : true
       });
     } else {
@@ -332,7 +334,7 @@ function getState(t = today()) {
       out.push({
         id: h.id, name: h.name, emoji: h.emoji, any_days: null, all_days: null, total: checked.length,
         streak: streakFor(union, t), longest: longestFor(union),
-        days: checked, skips, done_now: checked.includes(t)
+        days: checked, skips, due_now: true, done_now: checked.includes(t)
       });
     }
   }
@@ -951,7 +953,11 @@ function render(st) {
   // Built into a fragment and attached in one go, so the browser lays out and paints
   // the board once instead of after every habit.
   const frag = document.createDocumentFragment();
-  let done = 0;
+  // The ring counts the day's actual targets: the habits whose today cell is lit, i.e.
+  // the ones scheduled for today (due_now, the same rule that leaves a cell 'off'
+  // below). A habit that isn't scheduled today is nothing to do, so it belongs in
+  // neither half of the fraction rather than padding both.
+  let done = 0, due = 0;
   if (!st.habits.length) {
     const e = document.createElement('div'); e.className = 'empty';
     e.textContent = t('empty');
@@ -962,7 +968,7 @@ function render(st) {
     const set = new Set(h.days);
     const skipSet = new Set(h.skips || []);
     const allowed = h.any_days ? new Set(h.any_days) : (h.all_days ? new Set(h.all_days) : null);
-    if (h.done_now) done++;
+    if (h.due_now) { due++; if (h.done_now) done++; }
 
     const block = document.createElement('div');
     block.className = 'habit';
@@ -1016,12 +1022,12 @@ function render(st) {
   }
   document.getElementById('rows').replaceChildren(frag);
 
-  const total = st.habits.length;
-  const pct = total ? done/total : 0;
+  // Nothing due today reads as a finished day, not an empty one.
+  const pct = due ? done/due : 1;
   const ring = document.getElementById('ring');
   ring.style.strokeDashoffset = String(150.8 * (1 - pct));
   ring.style.stroke = pct >= 1 ? '#10b981' : '#3b82f6';
-  document.getElementById('ring-label').textContent = done + '/' + total;
+  document.getElementById('ring-label').textContent = done + '/' + due;
 }
 
 // ---------- delegated cell interaction ----------

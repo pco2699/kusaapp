@@ -20,6 +20,11 @@ beforeEach(() => { reset(db); srv.mod.invalidateState(); });
 
 const only = (t) => getState(t).habits[0];
 const doneCount = (t) => getState(t).habits.filter(h => h.done_now).length;
+// What the ring reads: only the habits scheduled for the day count, on either side.
+const ring = (t) => {
+  const due = getState(t).habits.filter(h => h.due_now);
+  return due.filter(h => h.done_now).length + '/' + due.length;
+};
 
 describe('daily habits', () => {
   test('done_now follows the check-in for the day asked about', () => {
@@ -168,6 +173,24 @@ describe('the reported board', () => {
     const outstanding = getState('2026-08-31').habits.filter(h => !h.done_now).map(h => h.name);
     assert.deepEqual(outstanding.sort(), ['Dont eat snack', 'Launch Ableton Live', 'Launch App for Podcast',
       'Launch Kindle', "Launch O'reilly", 'Log Worklog', 'Running']);
+  });
+
+  test('only the habits scheduled for the day are due', () => {
+    const sunday = getState(SUN).habits.filter(h => h.due_now).map(h => h.name);
+    assert.deepEqual(sunday.sort(), ['Launch Ableton Live', 'Launch App for Podcast', 'Launch Kindle',
+      'Mustle Training', "Launch O'reilly"].sort(), 'the Mon-Fri habits are not targets on a Sunday');
+
+    const monday = getState('2026-08-31').habits.filter(h => h.due_now).map(h => h.name);
+    assert.deepEqual(monday.sort(), ['Dont eat snack', 'Launch Ableton Live', 'Launch App for Podcast',
+      'Launch Kindle', "Launch O'reilly", 'Log Worklog', 'Running'], 'the weekend habit is not a target on a Monday');
+  });
+
+  test('the ring counts the day\'s targets, not every habit', () => {
+    // The reported bug: 8 habits on the board, only 7 of them targets on the Monday,
+    // and the ring still read out of 8 - counting a weekend habit as both due and done.
+    assert.equal(getState('2026-08-31').habits.length, 8);
+    assert.equal(ring('2026-08-31'), '0/7');
+    assert.equal(ring(SUN), '5/5', 'everything due on the Sunday is done');
   });
 });
 
