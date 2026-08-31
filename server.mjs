@@ -303,19 +303,17 @@ function getState() {
       const runs = weekRuns(any);
       const satKeys = new Set(checked.map(ds => { const pi = periodInfo(ds, runs); return pi && pi.key; }).filter(Boolean));
       const skipKeys = new Set(skips.map(ds => { const pi = periodInfo(ds, runs); return pi && pi.key; }).filter(Boolean));
-      // done_now: the period relevant to today = first allowed day walking back <= 7 days
-      let relKey = null;
-      const d = new Date(t + 'T12:00:00');
-      for (let i = 0; i < 7; i++) {
-        if (allowed.has(d.getDay())) { const pi = periodInfo(dateFmt(d), runs); relKey = pi && pi.key; break; }
-        d.setDate(d.getDate() - 1);
-      }
+      // done_now: only the period today itself falls in. On a weekday the habit isn't
+      // scheduled for there is nothing to do, so it counts as done rather than dragging
+      // the day's count down with a period that closed days ago — the same way an
+      // all-of-weekday habit is done_now on a day it isn't scheduled.
+      const todayPi = allowed.has(new Date(t + 'T12:00:00').getDay()) ? periodInfo(t, runs) : null;
       out.push({
         id: h.id, name: h.name, emoji: h.emoji, any_days: any, all_days: null, total: checked.length,
         streak: streakPeriods(satKeys, skipKeys, t, runs, allowed),
         longest: longestPeriods(new Set([...satKeys, ...skipKeys])),
         days: checked, skips,
-        done_now: relKey ? satKeys.has(relKey) : false
+        done_now: todayPi ? satKeys.has(todayPi.key) : true
       });
     } else {
       const union = new Set([...checked, ...skips]);
