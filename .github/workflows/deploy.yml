@@ -35,8 +35,13 @@ jobs:
 
       - name: Check the deploy target is configured
         run: |
-          : "${DEPLOY_HOST:?set the DEPLOY_HOST repository variable to the VPS's MagicDNS name}"
-          : "${DEPLOY_USER:?set the DEPLOY_USER repository variable to the login user on the VPS}"
+          if [ -z "$DEPLOY_HOST" ] || [ -z "$DEPLOY_USER" ]; then
+            echo "This deploy needs two repository variables, under" >&2
+            echo "Settings -> Secrets and variables -> Actions -> Variables:" >&2
+            echo "  DEPLOY_HOST  the VPS's MagicDNS name on your tailnet, e.g. vps" >&2
+            echo "  DEPLOY_USER  the login user owning the checkout and the systemd unit" >&2
+            exit 1
+          fi
 
       - name: Join the tailnet
         uses: tailscale/github-action@v4
