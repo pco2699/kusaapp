@@ -46,13 +46,15 @@ Auth: `?key=<token>` or `Authorization: Bearer <token>`.
 
 | Call | Does |
 | --- | --- |
-| `GET /api/state` | everything: `{ today, habits: [{ id, name, emoji, any_days, all_days, days, skips, streak, longest, total, done_now }] }` — `?days=N` widens the window |
+| `GET /api/state` | everything: `{ today, habits: [{ id, name, emoji, any_days, all_days, days, skips, streak, longest, total, due_now, done_now }] }` — `?days=N` widens the window |
 | `POST /api/toggle` `{ habit_id, date? }` | check in / undo; `date` defaults to today (`YYYY-MM-DD`) |
 | `POST /api/skip` `{ habit_id, date? }` | mark skipped / unskip |
 | `POST /api/habits` | `{ op:"create", name, emoji?, any_days?, all_days? }` → `{ id }`, or `{ op:"delete", id }` |
 | `GET /api/health` | `{ ok: true }` |
 
 `days` = check-in dates, `skips` = skipped dates, `total` counts check-ins only.
+`due_now` = the habit is scheduled for today; a habit that isn't is reported `done_now: true`,
+because there is nothing to do. The app's ring counts only the `due_now` habits.
 
 ## Gotchas
 
