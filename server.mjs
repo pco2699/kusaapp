@@ -426,12 +426,21 @@ const MANIFEST = JSON.stringify({
   ]
 });
 
-const SW = `const V = 'habits-v2';
+// The cache name carries a build fingerprint (filled in once the client assets below
+// exist). A fixed name meant a deploy shipped a byte-identical sw.js, so the browser
+// never saw a new worker and the update prompt could never fire.
+const SW_SRC = `const V = '__ASSET_VERSION__';
 const SCOPE = new URL(self.registration.scope);
 function abs(p) { return new URL(p, SCOPE).toString(); }
 const SHELL = [abs('./'), abs('./manifest.webmanifest'), abs('./icon-192.png'), abs('./icon-512.png')];
 self.addEventListener('install', e => {
-  e.waitUntil(caches.open(V).then(c => c.addAll(SHELL)).then(() => self.skipWaiting()));
+  // No skipWaiting() here: the fresh worker installs and then *waits*, so the running
+  // page can offer the update instead of having the app swap out under the user.
+  e.waitUntil(caches.open(V).then(c => c.addAll(SHELL)));
+});
+// The page asks for the swap once the user accepts it.
+self.addEventListener('message', e => {
+  if (e.data && e.data.type === 'SKIP_WAITING') self.skipWaiting();
 });
 self.addEventListener('activate', e => {
   e.waitUntil(caches.keys().then(ks => Promise.all(ks.filter(k => k !== V).map(k => caches.delete(k)))).then(() => self.clients.claim()));
@@ -471,7 +480,6 @@ self.addEventListener('fetch', e => {
 });
 `;
 
-const SW_BUNDLE = bundle(SW, 'application/javascript; charset=utf-8');
 const MANIFEST_BUNDLE = bundle(MANIFEST, 'application/manifest+json');
 
 // Icons are read into memory once instead of hitting the disk synchronously on every
@@ -654,6 +662,21 @@ const HTML_SHELL = `<!doctype html>
   #hmenu button { display:block; width:100%; text-align:left; background:none; border:none; color:var(--tx); font-size:14px; padding:10px 12px; border-radius:9px; cursor:pointer; }
   #hmenu button:hover { background:var(--soft); }
   #hmenu button.danger { color:#ef4444; }
+
+  /* Sits above the floating add button, so neither covers the other. */
+  #update-toast { position:fixed; left:50%; transform:translateX(-50%); bottom:calc(88px + env(safe-area-inset-bottom));
+                  width:min(420px, calc(100vw - 32px)); z-index:60; display:none;
+                  align-items:center; gap:10px; background:var(--card); color:var(--tx);
+                  border:1px solid var(--line); border-radius:16px; padding:12px 14px;
+                  box-shadow:0 10px 30px rgba(20,30,60,.25); }
+  #update-toast.open { display:flex; animation:toastin .2s ease both; }
+  @keyframes toastin { from { opacity:0; transform:translateX(-50%) translateY(10px); }
+                       to { opacity:1; transform:translateX(-50%) translateY(0); } }
+  #update-text { font-size:14px; font-weight:600; flex:1; min-width:0; }
+  #update-toast .ubtns { display:flex; gap:4px; flex:none; }
+  #update-later { background:none; border:none; color:var(--sub); font-weight:600; font-size:14px; padding:9px 10px; cursor:pointer; }
+  #update-now { background:var(--btn); border:none; color:var(--btn-tx); font-weight:700; font-size:14px; border-radius:12px; padding:9px 16px; cursor:pointer; }
+  #update-now[disabled] { opacity:.6; cursor:default; }
 </style>
 </head><body>
 <div class="header">
@@ -735,6 +758,14 @@ const HTML_SHELL = `<!doctype html>
 </form></dialog>
 
 <div id="hmenu"></div>
+
+<div id="update-toast" role="status" aria-live="polite">
+  <span id="update-text"></span>
+  <div class="ubtns">
+    <button type="button" id="update-later" onclick="dismissUpdate()"></button>
+    <button type="button" id="update-now" onclick="applyUpdate()"></button>
+  </div>
+</div>
 `;
 
 // Split here so the server can slot the initial state in between: the document the
@@ -757,7 +788,8 @@ const I18N = {
     streakCur:'現在のストリーク', streakPeriod:'連続達成期間', badgeCur:'現在', badgeBest:'最長', badgeTotal:'累計',
     bestTitle:'最長', totalTitle:'累計', delete:'削除', delConfirm1:'「', delConfirm2:'」を削除？', stats:'統計', more:'メニュー',
     skip:'スキップ', streak:'連続', day:'日', skipHint:'長押し/右クリックでスキップ',
-    daySep:'・', anySuffix:'のどれか1回', allSuffix:' すべて'
+    daySep:'・', anySuffix:'のどれか1回', allSuffix:' すべて',
+    updateReady:'新しいバージョンがあります', updateNow:'更新', updateLater:'あとで', updating:'更新中…'
   },
   en: {
     themeToggle:'Toggle theme', addHabit:'＋ New habit', newHabit:'New habit', habitName:'Habit name',
@@ -767,7 +799,8 @@ const I18N = {
     streakCur:'Current streak', streakPeriod:'Streak periods', badgeCur:'cur', badgeBest:'best', badgeTotal:'total',
     bestTitle:'Longest streak', totalTitle:'Total check-ins', delete:'Delete', delConfirm1:'Delete "', delConfirm2:'"?', stats:'Stats', more:'Menu',
     skip:'skip', streak:'streak', day:'d', skipHint:'long-press/right-click to skip',
-    daySep:'/', anySuffix:' (any one)', allSuffix:' (all)'
+    daySep:'/', anySuffix:' (any one)', allSuffix:' (all)',
+    updateReady:'A new version is available', updateNow:'Update', updateLater:'Later', updating:'Updating…'
   }
 };
 function t(k){ var d = I18N[LANG] || I18N.en; return (d && d[k] !== undefined) ? d[k] : k; }
@@ -786,6 +819,9 @@ function applyI18n(){
   document.querySelector('#adddlg .ghost').textContent = t('cancel');
   document.querySelector('#adddlg .primary').textContent = t('add');
   document.getElementById('auth-text').innerHTML = t('enterKey');
+  document.getElementById('update-text').textContent = t('updateReady');
+  document.getElementById('update-later').textContent = t('updateLater');
+  document.getElementById('update-now').textContent = t('updateNow');
 }
 
 const PALETTE = ['#ff6b6b','#f59e0b','#10b981','#3b82f6','#8b5cf6','#ec4899','#14b8a6','#f97316','#6366f1','#84cc16'];
@@ -1249,6 +1285,68 @@ window.addEventListener('resize', () => {
 });
 }
 
+// ---------- service worker / update prompt ----------
+// A deploy changes the fingerprint baked into sw.js, so the browser installs a new
+// worker and parks it in the waiting state. Nothing swaps until the user says so — the page
+// keeps running the code it started with, which is what makes the reload safe.
+let PENDING_SW = null;
+let UPDATE_ACCEPTED = false;
+const UPDATE_CHECK_MS = 30 * 60 * 1000;
+
+function offerUpdate(worker){
+  if (!worker || PENDING_SW === worker) return;
+  PENDING_SW = worker;
+  const btn = document.getElementById('update-now');
+  btn.disabled = false;
+  btn.textContent = t('updateNow');
+  document.getElementById('update-toast').classList.add('open');
+}
+
+function dismissUpdate(){
+  document.getElementById('update-toast').classList.remove('open');
+}
+
+function applyUpdate(){
+  if (!PENDING_SW) return dismissUpdate();
+  const btn = document.getElementById('update-now');
+  btn.disabled = true;
+  btn.textContent = t('updating');
+  UPDATE_ACCEPTED = true;
+  // The reload rides on 'controllerchange' below, once the new worker has taken over.
+  PENDING_SW.postMessage({ type: 'SKIP_WAITING' });
+}
+
+function setupSW(){
+  if (!('serviceWorker' in navigator)) return;
+  // A page that registered the worker itself starts out uncontrolled, and that first
+  // activation is not an update — reloading there would bounce a first-time visitor for
+  // nothing. Every other controller swap is one: either this tab accepted the prompt, or
+  // another tab did and this one is now running against a newer worker.
+  const hadController = !!navigator.serviceWorker.controller;
+  let reloading = false;
+  navigator.serviceWorker.addEventListener('controllerchange', function(){
+    if (reloading || !(UPDATE_ACCEPTED || hadController)) return;
+    reloading = true;
+    location.reload();
+  });
+  navigator.serviceWorker.register(BASE + 'sw.js').then(function(reg){
+    // A worker that finished installing while the page was elsewhere is already waiting.
+    if (reg.waiting && navigator.serviceWorker.controller) offerUpdate(reg.waiting);
+    reg.addEventListener('updatefound', function(){
+      const w = reg.installing;
+      if (!w) return;
+      w.addEventListener('statechange', function(){
+        if (w.state === 'installed' && navigator.serviceWorker.controller) offerUpdate(w);
+      });
+    });
+    // An installed PWA can sit open for days; without these it would only notice a new
+    // version on a cold start.
+    const check = function(){ if (document.visibilityState === 'visible') reg.update().catch(function(){}); };
+    document.addEventListener('visibilitychange', check);
+    setInterval(check, UPDATE_CHECK_MS);
+  }).catch(function(){});
+}
+
 // ---------- boot ----------
 applyI18n();
 // The server ships the initial state inside this document, so the board is painted
@@ -1264,13 +1362,21 @@ requestAnimationFrame(function(){
     wireDialogs();
     load();          // revalidate; a no-op re-render when nothing moved
     flushQ();
-    if ('serviceWorker' in navigator) navigator.serviceWorker.register(BASE + 'sw.js').catch(function(){});
+    setupSW();
   }, 0);
 });
 </script></body></html>`;
 
 // Anonymous shell (no key yet): no state to inline, so it is built and compressed once.
 const HTML_ANON = bundle(HTML_SHELL + HTML_APP, 'text/html; charset=utf-8');
+
+// A fingerprint of everything the client actually runs. It changes exactly when the
+// shipped assets change, which is what makes the browser pick up a new service worker
+// (and so what makes the update prompt appear) on a deploy — and only then.
+const ASSET_VERSION = 'kusa-' + createHash('sha1')
+  .update(HTML_SHELL).update(HTML_APP).update(MANIFEST).update(SW_SRC)
+  .digest('base64url').slice(0, 12);
+const SW_BUNDLE = bundle(SW_SRC.replace('__ASSET_VERSION__', ASSET_VERSION), 'application/javascript; charset=utf-8');
 
 function htmlBundle() {
   const sc = stateEntry();

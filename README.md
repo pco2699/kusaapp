@@ -13,6 +13,7 @@ A minimal habit tracker that runs as a **single Node.js file** (zero npm depende
 - 🗓 **All-of-weekday habits** — e.g. "weekdays only": every selected day counts, non-selected days are auto-skipped (the streak bridges over them automatically).
 - 📊 Streak badges (current / best / total) per habit + daily progress ring
 - 📶 **PWA + offline** — installable (manifest + service worker), reads from cache when offline, and queues check-ins/skips in `localStorage` to flush when back online
+- 🔄 **Update prompt** — a deploy changes the fingerprint baked into `sw.js`, so the new worker installs and waits; the open app offers "新しいバージョンがあります / A new version is available" and only swaps in and reloads when you accept
 - 🌓 **Dark / light theme** — toggle in the header (🌙/☀️), follows the system preference by default, persisted per device (`?theme=dark|light` also works)
 - 🖥️ **Responsive** — 7-day grid on phones, up to 45 days on wide screens (cells scale up)
 - 🌱 Archiving (soft delete) — history is never lost
