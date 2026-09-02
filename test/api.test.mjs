@@ -69,6 +69,35 @@ describe('auth', () => {
   });
 });
 
+describe('service worker updates', () => {
+  const sw = async () => (await fetch(s.base + '/sw.js')).text();
+
+  test('the cache name carries a build fingerprint', async () => {
+    const src = await sw();
+    assert.ok(!src.includes('__ASSET_VERSION__'), 'the placeholder must be substituted');
+    assert.match(src, /^const V = 'kusa-[A-Za-z0-9_-]+';/m);
+  });
+
+  test('installing does not take over — the new worker waits for the user', async () => {
+    const src = await sw();
+    const install = src.slice(src.indexOf("addEventListener('install'"), src.indexOf("addEventListener('message'"))
+      .split('\n').filter(l => !l.trim().startsWith('//')).join('\n');
+    assert.ok(!install.includes('skipWaiting'), 'the update must not swap in unprompted');
+    assert.match(src, /addEventListener\('message'[\s\S]*SKIP_WAITING[\s\S]*skipWaiting\(\)/,
+      'the page needs a way to accept the update');
+  });
+
+  test('the document offers the update instead of reloading behind the user', async () => {
+    const html = await (await fetch(s.base + '/')).text();
+    assert.ok(html.includes('id="update-toast"'), 'the prompt is part of the shell');
+    assert.match(html, /postMessage\(\{ type: 'SKIP_WAITING' \}\)/);
+    // The very first install also fires controllerchange; reloading there would bounce
+    // a first-time visitor for nothing — but an accepted update always reloads, even on
+    // the page that installed the worker in the first place.
+    assert.match(html, /if \(reloading \|\| !\(UPDATE_ACCEPTED \|\| hadController\)\) return;/);
+  });
+});
+
 describe('habits', () => {
   test('create returns an id and the habit shows up in the state', async () => {
     const r = await create({ name: 'Read', emoji: '📖' });
