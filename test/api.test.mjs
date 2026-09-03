@@ -78,6 +78,14 @@ describe('service worker updates', () => {
     assert.match(src, /^const V = 'kusa-[A-Za-z0-9_-]+';/m);
   });
 
+  test('cached PWA responses are partitioned and expired by calendar day', async () => {
+    const src = await sw();
+    assert.match(src, /function dailyV\(\)/);
+    assert.match(src, /const cacheName = dailyV\(\)/);
+    assert.match(src, /k !== cacheName[\s\S]*caches\.delete\(k\)/);
+    assert.ok(!src.includes('caches.match(req'), 'lookups must not search expired daily caches');
+  });
+
   test('installing does not take over — the new worker waits for the user', async () => {
     const src = await sw();
     const install = src.slice(src.indexOf("addEventListener('install'"), src.indexOf("addEventListener('message'"))

@@ -320,14 +320,17 @@ function getState(t = today()) {
       // scheduled for there is nothing to do, so it counts as done rather than dragging
       // the day's count down with a period that closed days ago — the same way an
       // all-of-weekday habit is done_now on a day it isn't scheduled.
-      const due = allowed.has(new Date(t + 'T12:00:00').getDay());
-      const todayPi = due ? periodInfo(t, runs) : null;
+      const scheduled = allowed.has(new Date(t + 'T12:00:00').getDay());
+      const todayPi = scheduled ? periodInfo(t, runs) : null;
+      const satisfied = !!todayPi && satKeys.has(todayPi.key);
       out.push({
         id: h.id, name: h.name, emoji: h.emoji, any_days: any, all_days: null, total: checked.length,
         streak: streakPeriods(satKeys, skipKeys, t, runs, allowed),
         longest: longestPeriods(new Set([...satKeys, ...skipKeys]), runs.length),
-        days: checked, skips, due_now: due,
-        done_now: todayPi ? satKeys.has(todayPi.key) : true
+        // A completion made today remains part of today's completed target count; a
+        // completion on an earlier day removes the remaining days in this period.
+        days: checked, skips, due_now: scheduled && (!satisfied || checked.includes(t)),
+        done_now: todayPi ? satisfied : true
       });
     } else {
       const union = new Set([...checked, ...skips]);
@@ -432,32 +435,43 @@ const MANIFEST = JSON.stringify({
 const SW_SRC = `const V = '__ASSET_VERSION__';
 const SCOPE = new URL(self.registration.scope);
 function abs(p) { return new URL(p, SCOPE).toString(); }
+// Keep cached state for one local calendar day only. A newly opened installed app
+// therefore misses yesterday's document/API entries and goes to the network, while
+// the current day's cache remains available offline.
+function dailyV() {
+  const d = new Date();
+  return V + '-' + d.getFullYear() + '-' + String(d.getMonth() + 1).padStart(2, '0') + '-' + String(d.getDate()).padStart(2, '0');
+}
 const SHELL = [abs('./'), abs('./manifest.webmanifest'), abs('./icon-192.png'), abs('./icon-512.png')];
 self.addEventListener('install', e => {
   // No skipWaiting() here: the fresh worker installs and then *waits*, so the running
   // page can offer the update instead of having the app swap out under the user.
-  e.waitUntil(caches.open(V).then(c => c.addAll(SHELL)));
+  e.waitUntil(caches.open(dailyV()).then(c => c.addAll(SHELL)));
 });
 // The page asks for the swap once the user accepts it.
 self.addEventListener('message', e => {
   if (e.data && e.data.type === 'SKIP_WAITING') self.skipWaiting();
 });
 self.addEventListener('activate', e => {
-  e.waitUntil(caches.keys().then(ks => Promise.all(ks.filter(k => k !== V).map(k => caches.delete(k)))).then(() => self.clients.claim()));
+  e.waitUntil(caches.keys().then(ks => Promise.all(ks.filter(k => k.startsWith('kusa-') && k !== dailyV()).map(k => caches.delete(k)))).then(() => self.clients.claim()));
 });
 self.addEventListener('fetch', e => {
   const req = e.request;
   if (req.method !== 'GET') return;
   const url = new URL(req.url);
   if (url.origin !== self.location.origin) return;
+  const cacheName = dailyV();
+  // Activation does not run at midnight, so remove expired daily caches lazily on
+  // the first request after the date changes.
+  e.waitUntil(caches.keys().then(ks => Promise.all(ks.filter(k => k.startsWith(V + '-') && k !== cacheName).map(k => caches.delete(k)))));
   const isApi = url.pathname.indexOf('/api/') >= 0;
   if (isApi) {
     e.respondWith(
       fetch(req).then(r => {
         const cp = r.clone();
-        caches.open(V).then(c => c.put(req, cp));
+        caches.open(cacheName).then(c => c.put(req, cp));
         return r;
-      }).catch(() => caches.match(req).then(m => m || new Response('{"offline":true}', { status: 503, headers: { 'Content-Type': 'application/json' } })))
+      }).catch(() => caches.open(cacheName).then(c => c.match(req)).then(m => m || new Response('{"offline":true}', { status: 503, headers: { 'Content-Type': 'application/json' } })))
     );
   } else {
     // Stale-while-revalidate: answer from the cache immediately (the shell now carries
@@ -465,11 +479,11 @@ self.addEventListener('fetch', e => {
     // then refresh the entry in the background. Plain cache-first pinned both the state
     // and the app code to whatever was cached at install time.
     e.respondWith(
-      caches.match(req, { ignoreSearch: true, ignoreVary: true }).then(m => {
+      caches.open(cacheName).then(c => c.match(req, { ignoreSearch: true, ignoreVary: true })).then(m => {
         const net = fetch(req).then(r => {
           if (r && r.ok) {
             const cp = r.clone();
-            caches.open(V).then(c => c.put(req, cp));
+            caches.open(cacheName).then(c => c.put(req, cp));
           }
           return r;
         }).catch(err => { if (m) return m; throw err; });
@@ -1047,7 +1061,10 @@ function render(st) {
       run = set.has(ds) ? run + 1 : 0;
       if (i < LEAD) continue;
       const d = days[i - LEAD];
-      const off = allowed && !allowed.has(d.getDay());
+      // Once an any-of period was completed on an earlier day, today is no longer a
+      // target. Fade and disable that cell just like an unscheduled weekday.
+      const off = (allowed && !allowed.has(d.getDay())) ||
+        (ds === todayStr && h.any_days && !h.due_now && !set.has(ds));
       const heat = run ? (run > 4 ? ' on h5' : (run > 1 ? ' on h' + run : ' on')) : '';
       parts.push('<div class="hcell' + (off ? ' off' : '') + (skipSet.has(ds) ? ' skip' : '') +
         (ds === todayStr ? ' today' : '') + heat + '" data-d="' + ds + '"></div>');
@@ -1346,6 +1363,14 @@ function setupSW(){
     setInterval(check, UPDATE_CHECK_MS);
   }).catch(function(){});
 }
+
+// Installed PWAs are commonly left in memory overnight. Refresh as soon as such a
+// page is opened again, rather than continuing to render yesterday's inlined state.
+function refreshAfterDayChange(){
+  if (document.visibilityState === 'visible' && CURRENT && fmt(new Date()) !== CURRENT.today) load();
+}
+document.addEventListener('visibilitychange', refreshAfterDayChange);
+window.addEventListener('pageshow', refreshAfterDayChange);
 
 // ---------- boot ----------
 applyI18n();
