@@ -84,6 +84,12 @@ describe('any-of-weekday habits', () => {
     assert.equal(only(SUN).done_now, true);
   });
 
+  test('one hit removes the remaining weekdays from the current targets', () => {
+    addHabit(db, { name: 'Running', mode: 'any', days: WEEKDAYS, checked: [MON] });
+    assert.equal(only(TUE).due_now, false, 'Monday already fulfilled this weekly target');
+    assert.equal(only(FRI).due_now, false);
+  });
+
   test('the next period starts outstanding again', () => {
     addHabit(db, { name: 'Running', mode: 'any', days: WEEKDAYS, checked: [MON] });
     assert.equal(only('2026-08-31').done_now, false, 'a new Mon–Fri week, nothing done in it yet');
