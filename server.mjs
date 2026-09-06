@@ -42,7 +42,7 @@ try { db.exec('ALTER TABLE habits ADD COLUMN any_days TEXT'); } catch {}
 try { db.exec('ALTER TABLE checkins ADD COLUMN skip INTEGER DEFAULT 0'); } catch {}
 try { db.exec('ALTER TABLE habits ADD COLUMN all_days TEXT'); } catch {}
 
-// Date helpers. These sit inside the streak walks, which run per habit per day, so a
+// Date helpers. These sit inside the score walk, which runs per habit per day, so a
 // formatter built per call showed up as the single biggest cost in /api/state. The
 // timezone-aware formatter is built once; the local-date one is plain string math
 // (identical 'en-CA' YYYY-MM-DD output, none of the Intl overhead).
@@ -161,33 +161,9 @@ function parseAnyDays(v) {
   return a.length ? a : null;
 }
 
-// ---------- daily streak ----------
-// Anchored on noon of the reference day and stepped with dateFmt, like the scheduled and
-// period walks below: stepping a Date by a day and re-formatting it in a *different*
-// timezone can land twice on the same calendar day across a DST shift.
-function streakFor(daysSet, t) {
-  const d = new Date(t + 'T12:00:00');
-  if (!daysSet.has(dateFmt(d))) d.setDate(d.getDate() - 1);
-  let n = 0;
-  while (daysSet.has(dateFmt(d))) { n++; d.setDate(d.getDate() - 1); }
-  return n;
-}
-function longestFor(daysSet) {
-  const arr = [...daysSet].sort();
-  let best = 0, cur = 0, prev = null;
-  for (const d of arr) {
-    if (prev) {
-      const nd = new Date(prev + 'T12:00:00');
-      nd.setDate(nd.getDate() + 1);
-      cur = (dateFmt(nd) === d) ? cur + 1 : 1;
-    } else cur = 1;
-    prev = d;
-    if (cur > best) best = cur;
-  }
-  return best;
-}
-
-// ---------- any-of-weekday period streak ----------
+// ---------- weekday periods ----------
+// An any-of-weekday habit's target is one check-in per *period*: a maximal run of
+// consecutive allowed weekdays. These map a date onto the period it belongs to.
 function monBased(dt) { const w = dt.getDay(); return w === 0 ? 7 : w; }
 // split allowed weekdays into maximal consecutive runs (Mon-based 1..7, wrap-aware)
 function weekRuns(allowed) {
@@ -214,69 +190,12 @@ function periodInfo(ds, runs) {
   }
   return null;
 }
-function streakPeriods(satKeys, skipKeys, todayStr, runs, allowed) {
-  let n = 0; const seen = new Set();
-  const d = new Date(todayStr + 'T12:00:00');
-  for (let i = 0; i < 800; i++) {
-    if (allowed.has(d.getDay())) {
-      const pi = periodInfo(dateFmt(d), runs);
-      if (pi && !seen.has(pi.key)) {
-        seen.add(pi.key);
-        if (satKeys.has(pi.key) || skipKeys.has(pi.key)) n++;
-        else if (i === 0) { /* current period still in progress: pending */ }
-        else return n;
-      }
-    }
-    d.setDate(d.getDate() - 1);
-  }
-  return n;
-}
-// Periods are numbered densely — `runsPerWeek` slots per week — so that the last period
-// of one week and the first of the next come out adjacent. Spacing them any wider (a
-// fixed 8, say) leaves a gap at every week boundary, and a habit with one period per
-// week could then never show a longest run above 1.
-function longestPeriods(keys, runsPerWeek) {
-  const arr = [...keys].map(k => { const p = k.split(':'); return Number(p[0]) * runsPerWeek + Number(p[1]); }).sort((a, b) => a - b);
-  let best = 0, cur = 0, prev = null;
-  for (const o of arr) { cur = (prev !== null && o === prev + 1) ? cur + 1 : 1; prev = o; if (cur > best) best = cur; }
-  return best;
-}
-
-// ---------- all-of-weekday scheduled streak ----------
-// streak counts consecutive *scheduled* days; non-scheduled days bridge automatically
-function streakScheduled(unionSet, allowed, todayStr) {
-  let n = 0; const d = new Date(todayStr + 'T12:00:00');
-  for (let i = 0; i < 800; i++) {
-    if (allowed.has(d.getDay())) {
-      const ds = dateFmt(d);
-      if (unionSet.has(ds)) n++;
-      else if (ds !== todayStr) return n;
-    }
-    d.setDate(d.getDate() - 1);
-  }
-  return n;
-}
-function longestScheduled(unionSet, allowed, todayStr) {
-  if (!unionSet.size) return 0;
-  let best = 0, cur = 0;
-  const d = new Date([...unionSet].sort()[0] + 'T12:00:00');
-  const end = new Date(todayStr + 'T12:00:00');
-  while (d <= end) {
-    if (allowed.has(d.getDay())) {
-      if (unionSet.has(dateFmt(d))) { cur++; if (cur > best) best = cur; }
-      else cur = 0;
-    }
-    d.setDate(d.getDate() + 1);
-  }
-  return best;
-}
-
 // ---------- habit strength (non-binary score) ----------
-// A streak is binary: one miss and it is back to 0. uhabits (github.com/iSoron/uhabits)
-// reports a *strength* alongside it instead — an exponentially smoothed average over the
-// whole history, where recent days weigh more than old ones, so a single miss dents the
-// number rather than erasing it, and a long run is worth more than a fresh one of the
-// same length. Same recurrence here:
+// How well a habit is being kept, as one number. A consecutive-day count is binary —
+// one miss and it is back to 0 — so this is uhabits' score instead
+// (github.com/iSoron/uhabits): an exponentially smoothed average over the whole history,
+// where recent days weigh more than old ones, so a miss dents the number rather than
+// erasing it, and a long run is worth more than a fresh one of the same length:
 //
 //   score = score * m + value * (1 - m)
 //
@@ -286,14 +205,16 @@ function longestScheduled(unionSet, allowed, todayStr) {
 // and applied there: over a week the two decay by exactly the same amount. A perfectly
 // kept daily habit reaches 80% after a month, 96% after two, 99% after three — the
 // numbers uhabits' FAQ quotes.
-const SCORE_HISTORY = 30;
+// The history the client gets back is what the board can draw: one score per calendar
+// day, ending on the reference day, so a cell's shade is that day's strength. It is not
+// front-padded — a habit younger than the window just returns a shorter array, and the
+// client aligns it from the end.
 
 // `valueAt(dateStr, date)` returns 1 (kept), 0 (missed), or null for a day that carries
 // the score unchanged: a skip, a day the habit isn't scheduled for, or a target whose
 // window is still open.
 function scoreWalk(first, t, freq, perWeek, valueAt) {
-  const zero = { score: 0, history: new Array(SCORE_HISTORY).fill(0) };
-  if (!first || first > t) return zero;
+  if (!first || first > t) return { score: 0, history: [] };
   const m = Math.pow(0.5, (Math.sqrt(freq) / 13) * (7 / perWeek));
   const hist = [];
   let s = 0;
@@ -305,10 +226,7 @@ function scoreWalk(first, t, freq, perWeek, valueAt) {
     hist.push(Math.round(s * 100));
     d.setDate(d.getDate() + 1);
   }
-  // The last SCORE_HISTORY days, oldest first, front-padded for a younger habit.
-  const history = hist.slice(-SCORE_HISTORY);
-  while (history.length < SCORE_HISTORY) history.unshift(0);
-  return { score: hist[hist.length - 1], history };
+  return { score: hist[hist.length - 1], history: hist.slice(-BOOT_DAYS) };
 }
 
 function firstEntry(checked, skips) {
@@ -348,11 +266,10 @@ function getState(t = today()) {
     try { all = h.all_days ? parseAnyDays(JSON.parse(h.all_days)) : null; } catch {}
     if (all) {
       const allowed = new Set(all);
-      const union = new Set([...checked, ...skips]);
       const due = allowed.has(new Date(t + 'T12:00:00').getDay());
       const hit = new Set(checked), skipped = new Set(skips);
-      // Only the scheduled days carry a value; the rest bridge, exactly as the streak
-      // treats them.
+      // Only the scheduled days carry a value; the rest carry the score across
+      // untouched, so a weekends-off habit is never marked down for the weekend.
       const sc = scoreWalk(firstEntry(checked, skips), t, all.length / 7, all.length, (ds, d) => {
         if (!allowed.has(d.getDay())) return null;
         if (hit.has(ds)) return 1;
@@ -361,8 +278,6 @@ function getState(t = today()) {
       });
       out.push({
         id: h.id, name: h.name, emoji: h.emoji, any_days: null, all_days: all, total: checked.length,
-        streak: streakScheduled(union, allowed, t),
-        longest: longestScheduled(union, allowed, t),
         score: sc.score, score_history: sc.history,
         days: checked, skips, due_now: due,
         done_now: due ? checked.includes(t) : true
@@ -392,8 +307,6 @@ function getState(t = today()) {
       });
       out.push({
         id: h.id, name: h.name, emoji: h.emoji, any_days: any, all_days: null, total: checked.length,
-        streak: streakPeriods(satKeys, skipKeys, t, runs, allowed),
-        longest: longestPeriods(new Set([...satKeys, ...skipKeys]), runs.length),
         score: sc.score, score_history: sc.history,
         // A completion made today remains part of today's completed target count; a
         // completion on an earlier day removes the remaining days in this period.
@@ -401,7 +314,6 @@ function getState(t = today()) {
         done_now: todayPi ? satisfied : true
       });
     } else {
-      const union = new Set([...checked, ...skips]);
       const hit = new Set(checked), skipped = new Set(skips);
       const sc = scoreWalk(firstEntry(checked, skips), t, 1, 7, (ds) => {
         if (hit.has(ds)) return 1;
@@ -410,7 +322,6 @@ function getState(t = today()) {
       });
       out.push({
         id: h.id, name: h.name, emoji: h.emoji, any_days: null, all_days: null, total: checked.length,
-        streak: streakFor(union, t), longest: longestFor(union),
         score: sc.score, score_history: sc.history,
         days: checked, skips, due_now: true, done_now: checked.includes(t)
       });
@@ -422,13 +333,13 @@ function getState(t = today()) {
 // ---------- state cache ----------
 // State only changes on writes (or when the day rolls over), so the computed state,
 // its JSON body and the state-inlined HTML document are all built once and reused.
-// This keeps the first page view off both the SQLite queries and the streak math.
+// This keeps the first page view off both the SQLite queries and the score math.
 let stateCache = null;
 
-// The grid never shows more than 45 days, and the heat shade saturates after 5
-// consecutive days, so the UI only ever reads a recent slice of the history. Bounding
-// what the first page view carries keeps its size flat as years of check-ins pile up;
-// streak/longest/total are computed server-side over the *full* history either way.
+// The grid never shows more than 45 days, so the UI only ever reads a recent slice of
+// the history. Bounding what the first page view carries keeps its size flat as years of
+// check-ins pile up; the score and the total are computed server-side over the *full*
+// history either way, and only the last BOOT_DAYS scores are shipped.
 const BOOT_DAYS = 180;
 
 function cutoff(days) {
@@ -437,7 +348,8 @@ function cutoff(days) {
   return dateFmt(d);
 }
 
-// Same state, with the per-habit date arrays clipped to the last `days` days.
+// Same state, with the per-habit date arrays clipped to the last `days` days. The score
+// history ends on `today`, so the same window is its last `days + 1` entries.
 function sliceState(state, days) {
   const from = cutoff(days);
   return {
@@ -445,7 +357,8 @@ function sliceState(state, days) {
     habits: state.habits.map(h => ({
       ...h,
       days: h.days.filter(d => d >= from),
-      skips: h.skips.filter(d => d >= from)
+      skips: h.skips.filter(d => d >= from),
+      score_history: h.score_history.slice(-(days + 1))
     }))
   };
 }
@@ -674,19 +587,15 @@ const HTML_SHELL = `<!doctype html>
   .hbtn.menu { font-size:23px; }
   .hbtn.info { transform:translateY(2px); }
 
-  /* Habit strength: the non-binary counterpart to the streak, as a ring around the
+  /* Habit strength, as a ring around the
      percentage. The conic gradient is the whole chart — no extra element per habit. */
   .hstr { width:34px; height:34px; border-radius:50%; flex:none; display:flex; align-items:center; justify-content:center;
           background:conic-gradient(var(--c) calc(var(--p) * 3.6deg), var(--ringbg) 0); }
   .hstr i { width:26px; height:26px; border-radius:50%; background:var(--card); display:flex; align-items:center; justify-content:center;
             font-style:normal; font-size:10.5px; font-weight:800; color:var(--c); letter-spacing:-.3px; }
 
-  .badges { display:flex; gap:7px; margin:0 0 12px 57px; }
-  .badge { width:42px; height:42px; border-radius:50%; display:flex; flex-direction:column; align-items:center; justify-content:center; }
+  .badge { border-radius:50%; display:flex; flex-direction:column; align-items:center; justify-content:center; }
   .badge b { font-size:15.5px; font-weight:800; line-height:1; }
-  .badge small { font-size:8.5px; font-weight:600; line-height:1; margin-top:2px; opacity:.8; }
-  .badge.cur { background:var(--c); color:#fff; }
-  .badge.best { background:color-mix(in srgb, var(--c) 14%, var(--mix)); color:var(--c); }
   .badge.tot { background:var(--soft); color:var(--sub); }
 
   .cells { display:grid; grid-template-columns:repeat(var(--n,7), minmax(0,80px)); justify-content:center; gap:6px; }
@@ -856,14 +765,6 @@ const HTML_SHELL = `<!doctype html>
   </div>
   <div class="stats">
     <div class="stat">
-      <div class="badge cur"><b id="stats-cur"></b></div>
-      <span id="stats-cur-label"></span>
-    </div>
-    <div class="stat">
-      <div class="badge best"><b id="stats-best"></b></div>
-      <span id="stats-best-label"></span>
-    </div>
-    <div class="stat">
       <div class="badge tot"><b id="stats-total"></b></div>
       <span id="stats-total-label"></span>
     </div>
@@ -899,9 +800,8 @@ const I18N = {
     chooseIcon:'アイコン選択', modeDaily:'毎日', modeAny:'選んだ曜日の<br>どれか1回でOK', modeAll:'選んだ曜日<br>すべて',
     weekday:'平日', weekend:'土日', allDays:'全部', cancel:'キャンセル', add:'追加', enterKey:'🔑 アクセスキーを入力',
     empty:'🌱 「＋ 新しい習慣」から最初の習慣を追加しよう', offline:'オフライン — キャッシュ表示中',
-    streakCur:'現在のストリーク', streakPeriod:'連続達成期間', badgeCur:'現在', badgeBest:'最長', badgeTotal:'累計',
-    bestTitle:'最長', totalTitle:'累計', delete:'削除', delConfirm1:'「', delConfirm2:'」を削除？', stats:'統計', more:'メニュー',
-    skip:'スキップ', streak:'連続', day:'日', skipHint:'長押し/右クリックでスキップ',
+    totalTitle:'累計', delete:'削除', delConfirm1:'「', delConfirm2:'」を削除？', stats:'統計', more:'メニュー',
+    skip:'スキップ', skipHint:'長押し/右クリックでスキップ',
     strength:'習慣の強さ', strengthCap:'直近30日の推移',
     daySep:'・', anySuffix:'のどれか1回', allSuffix:' すべて',
     updateReady:'新しいバージョンがあります', updateNow:'更新', updateLater:'あとで', updating:'更新中…'
@@ -911,9 +811,8 @@ const I18N = {
     chooseIcon:'Choose icon', modeDaily:'Daily', modeAny:'Any of the<br>selected days', modeAll:'All of the<br>selected days',
     weekday:'Weekdays', weekend:'Weekend', allDays:'All', cancel:'Cancel', add:'Add', enterKey:'🔑 Enter access key',
     empty:'🌱 Add your first habit with the ＋ button', offline:'Offline — showing cached data',
-    streakCur:'Current streak', streakPeriod:'Streak periods', badgeCur:'cur', badgeBest:'best', badgeTotal:'total',
-    bestTitle:'Longest streak', totalTitle:'Total check-ins', delete:'Delete', delConfirm1:'Delete "', delConfirm2:'"?', stats:'Stats', more:'Menu',
-    skip:'skip', streak:'streak', day:'d', skipHint:'long-press/right-click to skip',
+    totalTitle:'Total check-ins', delete:'Delete', delConfirm1:'Delete "', delConfirm2:'"?', stats:'Stats', more:'Menu',
+    skip:'skip', skipHint:'long-press/right-click to skip',
     strength:'Habit strength', strengthCap:'last 30 days',
     daySep:'/', anySuffix:' (any one)', allSuffix:' (all)',
     updateReady:'A new version is available', updateNow:'Update', updateLater:'Later', updating:'Updating…'
@@ -989,7 +888,15 @@ function fmt(ds){
   const m = ds.getMonth() + 1, d = ds.getDate();
   return ds.getFullYear() + '-' + (m < 10 ? '0' : '') + m + '-' + (d < 10 ? '0' : '') + d;
 }
-function shiftDay(ds, n){ const d = new Date(ds + 'T12:00:00'); d.setDate(d.getDate() + n); return fmt(d); }
+// Whole days from date string a to date string b. Both ends are anchored at noon, so a
+// DST shift in between can't round the difference to the wrong day.
+function dayDiff(a, b){ return Math.round((new Date(b + 'T12:00:00') - new Date(a + 'T12:00:00')) / 86400000); }
+// The strength on one day, out of a history that ends on the server's today.
+function scoreOn(h, ds){
+  const hist = h.score_history || [];
+  const v = hist[hist.length - 1 - dayDiff(ds, CURRENT ? CURRENT.today : ds)];
+  return typeof v === 'number' ? v : 0;
+}
 
 // ---------- offline write queue ----------
 const QKEY = 'habitsq';
@@ -1096,11 +1003,7 @@ function render(st) {
   document.getElementById('today-line').textContent = niceDate();
   const days = dateList();
   buildDates(days, todayStr);
-  // The rendered window plus a short run-up, as date strings, shared by every habit.
-  const LEAD = 5;
-  const chain = [];
-  for (let i = LEAD; i > 0; i--) { const d = new Date(days[0]); d.setDate(d.getDate() - i); chain.push(fmt(d)); }
-  for (const d of days) chain.push(fmt(d));
+  const dateStrs = days.map(fmt);
 
   // Built into a fragment and attached in one go, so the browser lays out and paints
   // the board once instead of after every habit.
@@ -1166,21 +1069,23 @@ function render(st) {
     cells.className = 'cells' + (N_DAYS > 14 ? ' dense' : '');
     cells.style.setProperty('--n', N_DAYS);
     CELLCTX.set(cells, { h: h, set: set, skipSet: skipSet });
-    // One pass over the window carrying the run length forward, rather than walking the
-    // streak backwards from every cell. LEAD days of run-up are enough because the heat
-    // shade saturates at 5 consecutive days, so a longer true streak cannot shade darker.
-    let run = 0;
+    // score_history ends on today, so the shade of each filled cell is that day's own
+    // strength: the board darkens as the habit gets stronger instead of as a run gets
+    // longer, and it stays dark through the day after a miss.
+    const hist = h.score_history || [];
+    const last = dateStrs.length - 1;
+    // The grid is built from the *browser's* today, which can be a day off the server's
+    // in another timezone; shift puts the history back in step without a Date per cell.
+    const shift = dayDiff(todayStr, dateStrs[last]);
     const parts = [];
-    for (let i = 0; i < chain.length; i++) {
-      const ds = chain[i];
-      run = set.has(ds) ? run + 1 : 0;
-      if (i < LEAD) continue;
-      const d = days[i - LEAD];
+    for (let i = 0; i < dateStrs.length; i++) {
+      const ds = dateStrs[i];
+      const d = days[i];
       // Once an any-of period was completed on an earlier day, today is no longer a
       // target. Fade and disable that cell just like an unscheduled weekday.
       const off = (allowed && !allowed.has(d.getDay())) ||
         (ds === todayStr && h.any_days && !h.due_now && !set.has(ds));
-      const heat = run ? (run > 4 ? ' on h5' : (run > 1 ? ' on h' + run : ' on')) : '';
+      const heat = set.has(ds) ? ' ' + heatClass(hist[hist.length - 1 - (last - i) + shift]) : '';
       parts.push('<div class="hcell' + (off ? ' off' : '') + (skipSet.has(ds) ? ' skip' : '') +
         (ds === todayStr ? ' today' : '') + heat + '" data-d="' + ds + '"></div>');
     }
@@ -1210,8 +1115,10 @@ rowsEl.addEventListener('click', function(e){
   const cell = cellOf(e);
   if (!cell || cell.classList.contains('skip')) return;
   const c = CELLCTX.get(cell.parentNode);
+  // Optimistic: a check-in lands at roughly the habit's current strength, and the
+  // reload right after replaces it with the computed shade.
   if (cell.classList.contains('on')) cell.classList.remove(...HEAT_CLASSES);
-  else cell.classList.add('on', 'h5');
+  else cell.classList.add(...heatClass(c.h.score).split(' '));
   toggle(c.h.id, cell.getAttribute('data-d'));
 });
 rowsEl.addEventListener('contextmenu', function(e){
@@ -1232,7 +1139,7 @@ function cancelPress(){ if (pressTimer) { clearTimeout(pressTimer); pressTimer =
 rowsEl.addEventListener('touchend', cancelPress, { passive: true });
 rowsEl.addEventListener('touchmove', cancelPress, { passive: true });
 // Tooltips are built the first time a cell is actually pointed at. Composing them up
-// front meant thousands of strings and streak walks nobody would ever read.
+// front meant thousands of strings nobody would ever read.
 rowsEl.addEventListener('pointerover', function(e){
   const cell = cellOf(e);
   if (!cell || cell.dataset.t) return;
@@ -1242,7 +1149,7 @@ rowsEl.addEventListener('pointerover', function(e){
   const off = cell.classList.contains('off');
   cell.title = ds +
     (cell.classList.contains('skip') ? ' · ' + t('skip')
-      : (c.set.has(ds) ? ' · ' + t('streak') + runLen(c.set, ds) + t('day') : '')) +
+      : (c.set.has(ds) ? ' · ' + t('strength') + ' ' + scoreOn(c.h, ds) + '%' : '')) +
     (off ? ' · ×' : ' — ' + t('skipHint'));
 });
 
@@ -1266,20 +1173,14 @@ async function load() {
   render(st);
 }
 
-// Run lengths for a whole habit in one ascending pass, instead of walking the streak
-// backwards from every cell (which was quadratic, and every step built a Date).
-const RUNS = new WeakMap();
-function runMap(set){
-  let m = RUNS.get(set);
-  if (m) return m;
-  m = new Map();
-  for (const ds of [...set].sort()) m.set(ds, (m.get(shiftDay(ds, -1)) || 0) + 1);
-  RUNS.set(set, m);
-  return m;
-}
-function runLen(set, ds){ return runMap(set).get(ds) || 0; }
-// streak-based heat: 1日=淡い色 → 5日以上=濃い色 (see .hcell.on / .h2-.h5 above)
+// 強さベースのヒート: 20%未満=淡い色 → 80%以上=濃い色 (see .hcell.on / .h2-.h5 above).
+// Five buckets rather than a color-mix() per cell: the browser parses the five classes
+// once instead of once per filled day.
 const HEAT_CLASSES = ['on', 'h2', 'h3', 'h4', 'h5'];
+function heatClass(score){
+  const v = typeof score === 'number' ? score : 0;
+  return 'on' + (v >= 80 ? ' h5' : (v >= 60 ? ' h4' : (v >= 40 ? ' h3' : (v >= 20 ? ' h2' : ''))));
+}
 
 // ---------- emoji picker ----------
 const EMOJIS = ['🙂','😄','😊','😌','😍','😎','🥳','😴','💪','🏃','🚶','🧘','🤸','🚴','🏋️','🏊','🧗','🥗','🍎','🥦','🍚','☕','💧','📚','📖','✍️','💻','📝','🎨','🎸','🎹','🎤','🎮','🧠','🧹','🧺','🛏️','🚿','🪥','💊','💰','📈','🌱','☀️','🌙','⭐','🔥','❤️','✅','🎯','📅','⏰','🐾'];
@@ -1337,15 +1238,14 @@ function showStats(h, color){
   document.getElementById('stats-score').textContent = score + '%';
   document.getElementById('stats-score-label').textContent = t('strength');
   document.getElementById('stats-score-cap').textContent = t('strengthCap');
-  const hist = Array.isArray(h.score_history) && h.score_history.length ? h.score_history : [score];
+  // The history carries the whole board window; the trend line shows the last 30 days,
+  // which is what the caption under it promises.
+  const full = Array.isArray(h.score_history) ? h.score_history : [];
+  const hist = full.length ? full.slice(-30) : [score];
   const sp = sparkPaths(hist);
   document.getElementById('spark-line').setAttribute('d', sp.line);
   document.getElementById('spark-area').setAttribute('d', sp.area);
-  document.getElementById('stats-cur').textContent = h.streak;
-  document.getElementById('stats-best').textContent = h.longest;
   document.getElementById('stats-total').textContent = h.total;
-  document.getElementById('stats-cur-label').textContent = h.any_days ? t('streakPeriod') : t('streakCur');
-  document.getElementById('stats-best-label').textContent = t('bestTitle');
   document.getElementById('stats-total-label').textContent = t('totalTitle');
   dlg.showModal();
 }

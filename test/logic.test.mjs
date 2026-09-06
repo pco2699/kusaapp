@@ -1,4 +1,5 @@
-// The date/streak math, exercised through getState() with an explicit reference day.
+// The date, period and strength math, exercised through getState() with an explicit
+// reference day.
 // The week used throughout is Mon 2026-08-24 … Sun 2026-08-30.
 import { test, describe, before, after, beforeEach } from 'node:test';
 import assert from 'node:assert/strict';
@@ -33,30 +34,14 @@ describe('daily habits', () => {
     assert.equal(only(SUN).done_now, false);
   });
 
-  test('the streak walks back from the reference day', () => {
-    addHabit(db, { name: 'Read', checked: [THU, FRI, SAT, SUN] });
-    assert.equal(only(SUN).streak, 4);
-  });
-
-  test('an unchecked today keeps yesterday-ending streaks alive', () => {
-    addHabit(db, { name: 'Read', checked: [FRI, SAT] });
-    const h = only(SUN);
-    assert.equal(h.done_now, false);
-    assert.equal(h.streak, 2, 'today is still open, so the streak is not broken yet');
-  });
-
-  test('a gap ends the streak but not the longest', () => {
+  test('the total counts every check-in, gaps and all', () => {
     addHabit(db, { name: 'Read', checked: [MON, TUE, WED, FRI, SAT, SUN] });
-    const h = only(SUN);
-    assert.equal(h.streak, 3);
-    assert.equal(h.longest, 3);
-    assert.equal(h.total, 6);
+    assert.equal(only(SUN).total, 6);
   });
 
-  test('skips bridge a streak without counting toward the total', () => {
+  test('a skip does not count toward the total', () => {
     addHabit(db, { name: 'Read', checked: [FRI, SUN], skipped: [SAT] });
     const h = only(SUN);
-    assert.equal(h.streak, 3);
     assert.equal(h.total, 2, 'a skip is not a check-in');
   });
 });
@@ -103,31 +88,26 @@ describe('any-of-weekday habits', () => {
     assert.equal(only(SUN).done_now, true, 'Saturday covers the same weekend period');
   });
 
-  test('the streak counts periods, not days', () => {
+  test('one check-in a week keeps the whole week scoring', () => {
     addHabit(db, {
       name: 'Running', mode: 'any', days: WEEKDAYS,
       checked: ['2026-08-11', '2026-08-18', MON]   // three consecutive Mon–Fri weeks
     });
     const h = only(FRI);
-    assert.equal(h.streak, 3);
-    assert.equal(h.longest, 3);
     assert.equal(h.total, 3);
+    assert.ok(h.score > 0, 'three periods in a row is a rising score: ' + h.score);
   });
 
-  test('the longest run counts across week boundaries', () => {
-    // One period per week, so consecutive weeks have to come out adjacent.
-    addHabit(db, { name: 'Gym', mode: 'any', days: WEEKEND, checked: ['2026-08-15', '2026-08-22', '2026-08-29'] });
-    assert.equal(only(SUN).longest, 3, 'three consecutive weekends');
-  });
-
-  test('the longest run stops at a missed period', () => {
-    addHabit(db, { name: 'Gym', mode: 'any', days: WEEKEND, checked: ['2026-08-01', '2026-08-15', '2026-08-22'] });
-    assert.equal(only(SUN).longest, 2, 'the weekend of the 8th was missed');
-  });
-
-  test('a missed week breaks the period streak', () => {
-    addHabit(db, { name: 'Running', mode: 'any', days: WEEKDAYS, checked: ['2026-08-11', MON] });
-    assert.equal(only(FRI).streak, 1, 'the week of the 17th was missed');
+  test('a missed week costs, without wiping out the weeks before it', () => {
+    const three = ['2026-08-15', '2026-08-22', '2026-08-29'];
+    addHabit(db, { name: 'Gym', mode: 'any', days: WEEKEND, checked: three });
+    const kept = only(SUN).score;
+    reset(db); srv.mod.invalidateState();
+    // The weekend of the 8th instead of the 22nd: same three check-ins, one gap.
+    addHabit(db, { name: 'Gym', mode: 'any', days: WEEKEND, checked: ['2026-08-01', '2026-08-08', '2026-08-29'] });
+    const gapped = only(SUN).score;
+    assert.ok(gapped < kept, 'the gap costs: ' + gapped + ' vs ' + kept);
+    assert.ok(gapped > 0, 'but the earlier weekends still count');
   });
 });
 
@@ -143,15 +123,18 @@ describe('all-of-weekday habits', () => {
     assert.equal(only(TUE).done_now, false);
   });
 
-  test('the streak bridges over days that are not scheduled', () => {
+  test('the weekend costs nothing on a weekdays-only habit', () => {
     addHabit(db, { name: 'Log Worklog', mode: 'all', days: WEEKDAYS, checked: [THU, FRI] });
-    assert.equal(only(SUN).streak, 2, 'the weekend is not scheduled, so it does not break Thu–Fri');
+    assert.equal(only(FRI).score, only(SUN).score, 'the unscheduled weekend leaves it where Friday did');
   });
 
-  test('a missed scheduled day ends the streak', () => {
+  test('a missed scheduled day costs', () => {
+    addHabit(db, { name: 'Log Worklog', mode: 'all', days: WEEKDAYS, checked: [MON, TUE, WED, THU, FRI] });
+    const kept = only(FRI).score;
+    reset(db); srv.mod.invalidateState();
     addHabit(db, { name: 'Log Worklog', mode: 'all', days: WEEKDAYS, checked: [MON, WED, THU, FRI] });
-    assert.equal(only(FRI).streak, 3, 'Tuesday was missed');
-    assert.equal(only(FRI).longest, 3);
+    const missed = only(FRI).score;
+    assert.ok(missed < kept, 'Tuesday was missed: ' + missed + ' vs ' + kept);
   });
 });
 
@@ -200,9 +183,9 @@ describe('the reported board', () => {
   });
 });
 
-// The strength is the non-binary counterpart to the streak: the reference numbers are
-// uhabits' own — a perfectly kept daily habit is at 80% after a month, 96% after two,
-// 99% after three.
+// The strength is the app's one number for how well a habit is being kept. The
+// reference values are uhabits' own — a perfectly kept daily habit is at 80% after a
+// month, 96% after two, 99% after three.
 describe('habit strength', () => {
   // `n` days ending on (and including) SUN.
   const run = (n, endOffset = 0) => {
@@ -227,14 +210,13 @@ describe('habit strength', () => {
     addHabit(db, { name: 'New' });
     const h = only(SUN);
     assert.equal(h.score, 0);
-    assert.deepEqual(h.score_history, new Array(30).fill(0));
+    assert.deepEqual(h.score_history, [], 'nothing to draw yet');
   });
 
-  test('a broken streak dents the score instead of erasing it', () => {
+  test('a run of misses dents the score instead of erasing it', () => {
     // Kept for 30 days, then missed the last three.
     addHabit(db, { name: 'Read', checked: run(30, 3) });
     const h = only(SUN);
-    assert.equal(h.streak, 0, 'the streak is binary and gone');
     assert.ok(h.score > 60, 'the strength keeps most of the month it earned: ' + h.score);
     assert.ok(h.score < 80, 'but it is below where it stood: ' + h.score);
   });
@@ -252,12 +234,13 @@ describe('habit strength', () => {
     assert.equal(h.score, only(daysBefore(SUN, 1)).score, 'still open, so nothing is deducted');
   });
 
-  test('the history is the last 30 days and ends on the current score', () => {
+  test('the history is one score per day, ending on the reference day', () => {
     addHabit(db, { name: 'Read', checked: run(45) });
     const h = only(SUN);
-    assert.equal(h.score_history.length, 30);
-    assert.equal(h.score_history[29], h.score);
-    assert.ok(h.score_history[0] < h.score_history[29], 'a kept habit climbs');
+    assert.equal(h.score_history.length, 45, 'one per day since the first check-in');
+    assert.equal(h.score_history[44], h.score, 'the last entry is today');
+    assert.equal(h.score_history[43], only(daysBefore(SUN, 1)).score, 'the one before it is yesterday');
+    assert.ok(h.score_history[0] < h.score_history[44], 'a kept habit climbs');
   });
 
   test('an all-of-weekday habit is not penalized for its off days', () => {
@@ -294,6 +277,18 @@ describe('state shape', () => {
     const sliced = srv.mod.sliceState(full, 180);
     assert.deepEqual(sliced.habits[0].days, [daysBefore(t, 1)]);
     assert.equal(sliced.habits[0].total, 2, 'the total is over the full history either way');
+    assert.equal(sliced.habits[0].score, full.habits[0].score, 'so is the score');
+  });
+
+  test('the score history is capped at the board window and clipped with it', () => {
+    const t = srv.mod.today();
+    addHabit(db, { name: 'Read', checked: [daysBefore(t, 1), daysBefore(t, 400)] });
+    const full = getState(t);
+    assert.equal(full.habits[0].score_history.length, 180, 'a year of history, one board window shipped');
+    const sliced = srv.mod.sliceState(full, 30);
+    const h = sliced.habits[0];
+    assert.equal(h.score_history.length, 31, 'the last 30 days plus today');
+    assert.equal(h.score_history[30], h.score, 'still ends on the reference day');
   });
 
   test('archived habits drop out of the state', () => {
