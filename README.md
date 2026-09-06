@@ -12,6 +12,11 @@ A minimal habit tracker that runs as a **single Node.js file** (zero npm depende
 - 📆 **Any-of-weekday habits** — e.g. "run on any weekday", "gym on either weekend day". Non-target days are shown faded and rejected by the API. The streak counts *periods* (one per maximal run of allowed weekdays), not calendar days.
 - 🗓 **All-of-weekday habits** — e.g. "weekdays only": every selected day counts, non-selected days are auto-skipped (the streak bridges over them automatically).
 - 📊 Streak badges (current / best / total) per habit + daily progress ring
+- 💪 **Habit strength** — a *non-binary* streak number, ported from
+  [uhabits](https://github.com/iSoron/uhabits): an exponentially smoothed score (0–100%)
+  over the whole history, shown as a ring on every card and as a 30-day trend line in the
+  stats popup. One miss dents it instead of erasing it, so there is still something to
+  protect on the day after a streak breaks
 - 📶 **PWA + offline** — installable (manifest + service worker), reads from cache when offline, and queues check-ins/skips in `localStorage` to flush when back online
 - 🔄 **Update prompt** — a deploy changes the fingerprint baked into `sw.js`, so the new worker installs and waits; the open app offers "新しいバージョンがあります / A new version is available" and only swaps in and reloads when you accept
 - 🌓 **Dark / light theme** — toggle in the header (🌙/☀️), follows the system preference by default, persisted per device (`?theme=dark|light` also works)
@@ -67,8 +72,9 @@ node --test            # everything
 node --test test/logic.test.mjs
 ```
 
-- `test/logic.test.mjs` — the streak, period and "done today" math, driven through
-  `getState(day)` so a test can ask about a specific weekday instead of waiting for one.
+- `test/logic.test.mjs` — the streak, period, strength and "done today" math, driven
+  through `getState(day)` so a test can ask about a specific weekday instead of waiting
+  for one.
 - `test/api.test.mjs` — boots the real server on a free port and exercises auth, the
   cookie rule, check-ins, skips, weekday enforcement, `days=` clipping, ETags and gzip.
 
@@ -77,16 +83,50 @@ names, so nothing touches your `habits.db`.
 
 ## API
 
-- `GET /api/state` — full state: habits with days, skips, streak/longest/total
-  - `?days=N` (optional) — clip each habit's `days`/`skips` to the last `N` days. Streaks
-    and totals are still computed over the full history. Omit it for everything; the web
-    UI passes `days=180`, which is all the grid can display.
+- `GET /api/state` — full state: habits with days, skips, streak/longest/total and
+  score/score_history
+  - `?days=N` (optional) — clip each habit's `days`/`skips` to the last `N` days. Streaks,
+    totals and scores are still computed over the full history. Omit it for everything;
+    the web UI passes `days=180`, which is all the grid can display.
 - `POST /api/toggle` — `{ habit_id, date? }` toggle a check-in
 - `POST /api/skip` — `{ habit_id, date? }` toggle a skip (streak bridges over)
 - `POST /api/habits` — `{ op: "create", name, emoji?, any_days?: number[], all_days?: number[] }` or `{ op: "delete", id }`
   - `any_days`: array of weekday numbers (0=Sun … 6=Sat) — one hit on any of these days counts
   - `all_days`: array of weekday numbers — every selected day counts; non-selected days are auto-skipped
   - both omitted/null → daily habit
+
+## Habit strength
+
+A streak is binary: miss one day and it reads 0, which is exactly when the number stops
+helping. Alongside it each habit carries a **strength** — the score
+[uhabits](https://github.com/iSoron/uhabits) uses, computed the same way:
+
+```
+score = score * m + value * (1 - m)          m = 0.5 ^ (√freq / 13)
+```
+
+`value` is 1 on a day the habit was kept and 0 on a day it was missed; the score is an
+exponentially smoothed average of the whole history, so recent days weigh more than old
+ones. Kept perfectly, a daily habit reaches 80% after a month, 96% after two and 99%
+after three — uhabits' own numbers, and the ones `test/logic.test.mjs` pins.
+
+The differences from a plain streak, and what they cost:
+
+- **A miss dents, it doesn't erase.** Thirty perfect days followed by three misses is a
+  streak of 0 and a strength of 72%.
+- **A skip changes nothing.** Skipped days are left out of the walk entirely, exactly as
+  they bridge a streak.
+- **An open target isn't a miss.** Today counts once it's done (or skipped); until then
+  the score just holds, the same way an unchecked today doesn't break a streak yet.
+- **Only the scheduled days count.** `freq` is the habit's target rate (1 daily, 5/7 for
+  a weekdays-only habit, one period per week for `any_days`), and `m` is applied on the
+  days that carry a value, raised to `7 / scheduled-days-per-week` so a week decays by
+  the same amount either way. A weekends-off habit is never punished for the weekend.
+
+`score` is that number, 0–100. `score_history` is the last 30 days of it, oldest first,
+which is what the stats popup draws. The walk covers the habit's whole history, but it
+runs inside `getState()` and lands in the same cache as the streaks — once per day, plus
+once per write — so no request pays for it twice.
 
 ## Performance
 

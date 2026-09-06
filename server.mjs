@@ -271,6 +271,52 @@ function longestScheduled(unionSet, allowed, todayStr) {
   return best;
 }
 
+// ---------- habit strength (non-binary score) ----------
+// A streak is binary: one miss and it is back to 0. uhabits (github.com/iSoron/uhabits)
+// reports a *strength* alongside it instead — an exponentially smoothed average over the
+// whole history, where recent days weigh more than old ones, so a single miss dents the
+// number rather than erasing it, and a long run is worth more than a fresh one of the
+// same length. Same recurrence here:
+//
+//   score = score * m + value * (1 - m)
+//
+// uhabits applies m = 0.5^(sqrt(freq)/13) once per calendar day, `freq` being the target
+// rate (1.0 for a daily habit, 5/7 for a weekdays-only one). We only have a value on the
+// days a habit is actually scheduled for, so the exponent is scaled by 7/scheduledPerWeek
+// and applied there: over a week the two decay by exactly the same amount. A perfectly
+// kept daily habit reaches 80% after a month, 96% after two, 99% after three — the
+// numbers uhabits' FAQ quotes.
+const SCORE_HISTORY = 30;
+
+// `valueAt(dateStr, date)` returns 1 (kept), 0 (missed), or null for a day that carries
+// the score unchanged: a skip, a day the habit isn't scheduled for, or a target whose
+// window is still open.
+function scoreWalk(first, t, freq, perWeek, valueAt) {
+  const zero = { score: 0, history: new Array(SCORE_HISTORY).fill(0) };
+  if (!first || first > t) return zero;
+  const m = Math.pow(0.5, (Math.sqrt(freq) / 13) * (7 / perWeek));
+  const hist = [];
+  let s = 0;
+  const d = new Date(first + 'T12:00:00');
+  const end = new Date(t + 'T12:00:00');
+  while (d <= end) {
+    const v = valueAt(dateFmt(d), d);
+    if (v !== null) s = s * m + v * (1 - m);
+    hist.push(Math.round(s * 100));
+    d.setDate(d.getDate() + 1);
+  }
+  // The last SCORE_HISTORY days, oldest first, front-padded for a younger habit.
+  const history = hist.slice(-SCORE_HISTORY);
+  while (history.length < SCORE_HISTORY) history.unshift(0);
+  return { score: hist[hist.length - 1], history };
+}
+
+function firstEntry(checked, skips) {
+  // Both arrays arrive sorted (the check-in query is ORDER BY date).
+  const a = checked[0], b = skips[0];
+  return (a && b) ? (a < b ? a : b) : (a || b || null);
+}
+
 // Statements are compiled once at startup rather than on every request.
 const Q_HABITS = db.prepare('SELECT id, name, emoji, any_days, all_days FROM habits WHERE archived=0 ORDER BY sort, id');
 const Q_CHECKINS = db.prepare('SELECT habit_id, date, skip FROM checkins ORDER BY date');
@@ -304,10 +350,20 @@ function getState(t = today()) {
       const allowed = new Set(all);
       const union = new Set([...checked, ...skips]);
       const due = allowed.has(new Date(t + 'T12:00:00').getDay());
+      const hit = new Set(checked), skipped = new Set(skips);
+      // Only the scheduled days carry a value; the rest bridge, exactly as the streak
+      // treats them.
+      const sc = scoreWalk(firstEntry(checked, skips), t, all.length / 7, all.length, (ds, d) => {
+        if (!allowed.has(d.getDay())) return null;
+        if (hit.has(ds)) return 1;
+        if (skipped.has(ds)) return null;
+        return ds === t ? null : 0;
+      });
       out.push({
         id: h.id, name: h.name, emoji: h.emoji, any_days: null, all_days: all, total: checked.length,
         streak: streakScheduled(union, allowed, t),
         longest: longestScheduled(union, allowed, t),
+        score: sc.score, score_history: sc.history,
         days: checked, skips, due_now: due,
         done_now: due ? checked.includes(t) : true
       });
@@ -323,10 +379,22 @@ function getState(t = today()) {
       const scheduled = allowed.has(new Date(t + 'T12:00:00').getDay());
       const todayPi = scheduled ? periodInfo(t, runs) : null;
       const satisfied = !!todayPi && satKeys.has(todayPi.key);
+      // One completion per period is the target, so every day of a satisfied period
+      // scores as kept and the period still open today scores as nothing yet. The rate
+      // is periods-per-week; the days that carry a value are the scheduled weekdays.
+      const openKey = todayPi && !satisfied && !skipKeys.has(todayPi.key) ? todayPi.key : null;
+      const sc = scoreWalk(firstEntry(checked, skips), t, runs.length / 7, any.length, (ds, d) => {
+        if (!allowed.has(d.getDay())) return null;
+        const pi = periodInfo(ds, runs);
+        if (!pi) return null;
+        if (satKeys.has(pi.key) || skipKeys.has(pi.key)) return 1;
+        return pi.key === openKey ? null : 0;
+      });
       out.push({
         id: h.id, name: h.name, emoji: h.emoji, any_days: any, all_days: null, total: checked.length,
         streak: streakPeriods(satKeys, skipKeys, t, runs, allowed),
         longest: longestPeriods(new Set([...satKeys, ...skipKeys]), runs.length),
+        score: sc.score, score_history: sc.history,
         // A completion made today remains part of today's completed target count; a
         // completion on an earlier day removes the remaining days in this period.
         days: checked, skips, due_now: scheduled && (!satisfied || checked.includes(t)),
@@ -334,9 +402,16 @@ function getState(t = today()) {
       });
     } else {
       const union = new Set([...checked, ...skips]);
+      const hit = new Set(checked), skipped = new Set(skips);
+      const sc = scoreWalk(firstEntry(checked, skips), t, 1, 7, (ds) => {
+        if (hit.has(ds)) return 1;
+        if (skipped.has(ds)) return null;
+        return ds === t ? null : 0;
+      });
       out.push({
         id: h.id, name: h.name, emoji: h.emoji, any_days: null, all_days: null, total: checked.length,
         streak: streakFor(union, t), longest: longestFor(union),
+        score: sc.score, score_history: sc.history,
         days: checked, skips, due_now: true, done_now: checked.includes(t)
       });
     }
@@ -599,6 +674,13 @@ const HTML_SHELL = `<!doctype html>
   .hbtn.menu { font-size:23px; }
   .hbtn.info { transform:translateY(2px); }
 
+  /* Habit strength: the non-binary counterpart to the streak, as a ring around the
+     percentage. The conic gradient is the whole chart — no extra element per habit. */
+  .hstr { width:34px; height:34px; border-radius:50%; flex:none; display:flex; align-items:center; justify-content:center;
+          background:conic-gradient(var(--c) calc(var(--p) * 3.6deg), var(--ringbg) 0); }
+  .hstr i { width:26px; height:26px; border-radius:50%; background:var(--card); display:flex; align-items:center; justify-content:center;
+            font-style:normal; font-size:10.5px; font-weight:800; color:var(--c); letter-spacing:-.3px; }
+
   .badges { display:flex; gap:7px; margin:0 0 12px 57px; }
   .badge { width:42px; height:42px; border-radius:50%; display:flex; flex-direction:column; align-items:center; justify-content:center; }
   .badge b { font-size:15.5px; font-weight:800; line-height:1; }
@@ -666,7 +748,18 @@ const HTML_SHELL = `<!doctype html>
   .chip.on { background:#10b981; border-color:#10b981; color:#fff; }
   .presets { display:flex; gap:6px; justify-content:center; margin-top:10px; }
   .pre { border:none; background:var(--soft); color:var(--sub); font-size:12px; font-weight:600; border-radius:9px; padding:7px 12px; cursor:pointer; }
-  .stats { display:flex; gap:16px; justify-content:center; margin:10px 0 6px; }
+  .strength { margin:4px 0 2px; }
+  .strow { display:flex; align-items:baseline; justify-content:center; gap:8px; }
+  .strow b { font-size:31px; font-weight:800; color:var(--c); line-height:1; }
+  .strow span { font-size:12.5px; color:var(--sub); font-weight:600; }
+  /* preserveAspectRatio="none" stretches the 30 points across whatever width the dialog
+     has; non-scaling-stroke keeps the line from being stretched with them. */
+  .spark { width:100%; height:54px; display:block; margin-top:10px; }
+  .spark .sl { fill:none; stroke:var(--c); stroke-width:2; vector-effect:non-scaling-stroke; stroke-linejoin:round; stroke-linecap:round; }
+  .spark .sa { fill:color-mix(in srgb, var(--c) 12%, transparent); stroke:none; }
+  .scap { text-align:center; font-size:11px; color:var(--sub); font-weight:600; margin-top:5px; }
+
+  .stats { display:flex; gap:16px; justify-content:center; margin:16px 0 6px; padding-top:14px; border-top:1px solid var(--line); }
   .stat { display:flex; flex-direction:column; align-items:center; gap:8px; }
   .stat .badge { width:60px; height:60px; }
   .stat .badge b { font-size:22px; }
@@ -754,6 +847,13 @@ const HTML_SHELL = `<!doctype html>
 
 <dialog id="statsdlg"><form method="dialog">
   <h3 id="stats-title"></h3>
+  <div class="strength">
+    <div class="strow"><b id="stats-score"></b><span id="stats-score-label"></span></div>
+    <svg class="spark" viewBox="0 0 100 40" preserveAspectRatio="none" aria-hidden="true">
+      <path class="sa" id="spark-area"></path><path class="sl" id="spark-line"></path>
+    </svg>
+    <div class="scap" id="stats-score-cap"></div>
+  </div>
   <div class="stats">
     <div class="stat">
       <div class="badge cur"><b id="stats-cur"></b></div>
@@ -802,6 +902,7 @@ const I18N = {
     streakCur:'現在のストリーク', streakPeriod:'連続達成期間', badgeCur:'現在', badgeBest:'最長', badgeTotal:'累計',
     bestTitle:'最長', totalTitle:'累計', delete:'削除', delConfirm1:'「', delConfirm2:'」を削除？', stats:'統計', more:'メニュー',
     skip:'スキップ', streak:'連続', day:'日', skipHint:'長押し/右クリックでスキップ',
+    strength:'習慣の強さ', strengthCap:'直近30日の推移',
     daySep:'・', anySuffix:'のどれか1回', allSuffix:' すべて',
     updateReady:'新しいバージョンがあります', updateNow:'更新', updateLater:'あとで', updating:'更新中…'
   },
@@ -813,6 +914,7 @@ const I18N = {
     streakCur:'Current streak', streakPeriod:'Streak periods', badgeCur:'cur', badgeBest:'best', badgeTotal:'total',
     bestTitle:'Longest streak', totalTitle:'Total check-ins', delete:'Delete', delConfirm1:'Delete "', delConfirm2:'"?', stats:'Stats', more:'Menu',
     skip:'skip', streak:'streak', day:'d', skipHint:'long-press/right-click to skip',
+    strength:'Habit strength', strengthCap:'last 30 days',
     daySep:'/', anySuffix:' (any one)', allSuffix:' (all)',
     updateReady:'A new version is available', updateNow:'Update', updateLater:'Later', updating:'Updating…'
   }
@@ -1044,7 +1146,20 @@ function render(st) {
     });
     const btns = document.createElement('div'); btns.className = 'hbtns';
     btns.appendChild(info); btns.appendChild(menu);
-    head.appendChild(em); head.appendChild(txt); head.appendChild(btns);
+    head.appendChild(em); head.appendChild(txt);
+    // A habit tracked before this field existed (a cached offline state, an old client)
+    // simply has no ring rather than a 0% one.
+    if (typeof h.score === 'number') {
+      const str = document.createElement('div');
+      str.className = 'hstr';
+      str.style.setProperty('--p', h.score);
+      str.title = t('strength') + ' ' + h.score + '%';
+      const inner = document.createElement('i');
+      inner.textContent = h.score + '%';
+      str.appendChild(inner);
+      head.appendChild(str);
+    }
+    head.appendChild(btns);
     block.appendChild(head);
 
     const cells = document.createElement('div');
@@ -1194,10 +1309,38 @@ function openAdd(){ document.getElementById('adddlg').showModal(); }
 function closeAdd(){ document.getElementById('adddlg').close(); }
 
 // ---------- stats popup + overflow menu ----------
+// The 30 scores as a line across the 100x40 viewBox, plus the same line closed along
+// the bottom for the fill underneath it. The y axis spans the values actually in the
+// window rather than a flat 0-100: a month spent between 81% and 96% is a visible climb
+// that way instead of a straight line near the top. A minimum span keeps a habit that
+// really did hold steady looking steady.
+function sparkPaths(hist){
+  const n = hist.length;
+  const lo = Math.min.apply(null, hist), hi = Math.max.apply(null, hist);
+  const span = Math.max(hi - lo + 10, 30);
+  let a = (lo + hi) / 2 - span / 2, b = a + span;
+  if (a < 0) { b -= a; a = 0; }
+  if (b > 100) { a = Math.max(0, a - (b - 100)); b = 100; }
+  const pts = hist.map(function(v, i){
+    const x = n > 1 ? (i / (n - 1)) * 100 : 0;
+    const y = 38 - ((Math.max(0, Math.min(100, v)) - a) / (b - a)) * 36;
+    return x.toFixed(2) + ',' + y.toFixed(2);
+  });
+  const line = 'M' + pts.join('L');
+  return { line: line, area: line + 'L100,40L0,40Z' };
+}
 function showStats(h, color){
   const dlg = document.getElementById('statsdlg');
   dlg.style.setProperty('--c', color);
   document.getElementById('stats-title').textContent = (h.emoji || '✨') + ' ' + h.name;
+  const score = typeof h.score === 'number' ? h.score : 0;
+  document.getElementById('stats-score').textContent = score + '%';
+  document.getElementById('stats-score-label').textContent = t('strength');
+  document.getElementById('stats-score-cap').textContent = t('strengthCap');
+  const hist = Array.isArray(h.score_history) && h.score_history.length ? h.score_history : [score];
+  const sp = sparkPaths(hist);
+  document.getElementById('spark-line').setAttribute('d', sp.line);
+  document.getElementById('spark-area').setAttribute('d', sp.area);
   document.getElementById('stats-cur').textContent = h.streak;
   document.getElementById('stats-best').textContent = h.longest;
   document.getElementById('stats-total').textContent = h.total;

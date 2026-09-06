@@ -200,6 +200,91 @@ describe('the reported board', () => {
   });
 });
 
+// The strength is the non-binary counterpart to the streak: the reference numbers are
+// uhabits' own — a perfectly kept daily habit is at 80% after a month, 96% after two,
+// 99% after three.
+describe('habit strength', () => {
+  // `n` days ending on (and including) SUN.
+  const run = (n, endOffset = 0) => {
+    const out = [];
+    for (let i = n - 1 + endOffset; i >= endOffset; i--) out.push(daysBefore(SUN, i));
+    return out;
+  };
+  const weekdaysIn = (dates) => dates.filter(d => WEEKDAYS.includes(new Date(d + 'T12:00:00').getDay()));
+
+  test('a perfectly kept daily habit follows the uhabits curve', () => {
+    addHabit(db, { name: '30d', checked: run(30) });
+    assert.equal(only(SUN).score, 80);
+    reset(db); srv.mod.invalidateState();
+    addHabit(db, { name: '60d', checked: run(60) });
+    assert.equal(only(SUN).score, 96);
+    reset(db); srv.mod.invalidateState();
+    addHabit(db, { name: '90d', checked: run(90) });
+    assert.equal(only(SUN).score, 99);
+  });
+
+  test('a habit with no history scores 0', () => {
+    addHabit(db, { name: 'New' });
+    const h = only(SUN);
+    assert.equal(h.score, 0);
+    assert.deepEqual(h.score_history, new Array(30).fill(0));
+  });
+
+  test('a broken streak dents the score instead of erasing it', () => {
+    // Kept for 30 days, then missed the last three.
+    addHabit(db, { name: 'Read', checked: run(30, 3) });
+    const h = only(SUN);
+    assert.equal(h.streak, 0, 'the streak is binary and gone');
+    assert.ok(h.score > 60, 'the strength keeps most of the month it earned: ' + h.score);
+    assert.ok(h.score < 80, 'but it is below where it stood: ' + h.score);
+  });
+
+  test('a skipped day leaves the score exactly where it was', () => {
+    // 27 kept days, then three skipped ones: a skip neither earns nor costs.
+    addHabit(db, { name: 'Read', checked: run(27, 3), skipped: run(3) });
+    assert.equal(only(SUN).score, only(daysBefore(SUN, 3)).score);
+  });
+
+  test('an unchecked today does not drop the score yet', () => {
+    addHabit(db, { name: 'Read', checked: run(30, 1) });
+    const h = only(SUN);
+    assert.equal(h.done_now, false);
+    assert.equal(h.score, only(daysBefore(SUN, 1)).score, 'still open, so nothing is deducted');
+  });
+
+  test('the history is the last 30 days and ends on the current score', () => {
+    addHabit(db, { name: 'Read', checked: run(45) });
+    const h = only(SUN);
+    assert.equal(h.score_history.length, 30);
+    assert.equal(h.score_history[29], h.score);
+    assert.ok(h.score_history[0] < h.score_history[29], 'a kept habit climbs');
+  });
+
+  test('an all-of-weekday habit is not penalized for its off days', () => {
+    addHabit(db, { name: 'Gym', mode: 'all', days: WEEKDAYS, checked: weekdaysIn(run(28)) });
+    const kept = only(SUN);
+    assert.ok(kept.score > 60, 'four perfect weeks of weekdays: ' + kept.score);
+    reset(db); srv.mod.invalidateState();
+    // Same four weeks with one weekday missed.
+    const missed = weekdaysIn(run(28)).filter(d => d !== daysBefore(SUN, 9));
+    addHabit(db, { name: 'Gym', mode: 'all', days: WEEKDAYS, checked: missed });
+    assert.ok(only(SUN).score < kept.score, 'a missed weekday costs something');
+  });
+
+  test('an any-of-weekday habit scores per period, not per day', () => {
+    // One Wednesday a week for four weeks satisfies every weekday period.
+    const weds = run(28).filter(d => new Date(d + 'T12:00:00').getDay() === 3);
+    addHabit(db, { name: 'Run', mode: 'any', days: WEEKDAYS, checked: weds });
+    const kept = only(SUN);
+    assert.ok(kept.score > 0);
+    reset(db); srv.mod.invalidateState();
+    addHabit(db, { name: 'Run', mode: 'any', days: WEEKDAYS, checked: weds.slice(0, -1) });
+    const skippedWeek = only(SUN);
+    assert.ok(skippedWeek.score < kept.score, 'a missed period costs something');
+    assert.ok(skippedWeek.score > 0, 'but the earlier weeks still count');
+  });
+});
+
 describe('state shape', () => {
   test('sliceState clips the date arrays but keeps the totals', () => {
     const t = srv.mod.today();

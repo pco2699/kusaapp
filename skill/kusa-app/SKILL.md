@@ -23,6 +23,9 @@ That's `POST /api/skip`, *not* a check-in. A skipped day keeps the run alive and
 **"How am I doing?"**
 `streak` is the current run, `longest` is their record, `total` is lifetime check-ins. When the current run is near the record, say so — that's the number they care about.
 
+**"I blew it — my streak's gone."**
+`score` (0–100) is the habit's *strength*: an exponentially smoothed average of the whole history, the way uhabits does it, so a miss dents it rather than zeroing it. This is the number to reach for the day a streak breaks — "the run's gone, but you're still at 72%, and two good days puts it back" is true and it's the honest read. Don't lead with it when a streak is alive and healthy; they're thinking in days then.
+
 **"Add a habit."** / **"Drop that one."**
 `POST /api/habits` with `op: create` / `op: delete`. Deletes are soft and recoverable, but confirm first: from their side, the history disappears with it.
 
@@ -46,13 +49,15 @@ Auth: `?key=<token>` or `Authorization: Bearer <token>`.
 
 | Call | Does |
 | --- | --- |
-| `GET /api/state` | everything: `{ today, habits: [{ id, name, emoji, any_days, all_days, days, skips, streak, longest, total, due_now, done_now }] }` — `?days=N` widens the window |
+| `GET /api/state` | everything: `{ today, habits: [{ id, name, emoji, any_days, all_days, days, skips, streak, longest, total, score, score_history, due_now, done_now }] }` — `?days=N` widens the window |
 | `POST /api/toggle` `{ habit_id, date? }` | check in / undo; `date` defaults to today (`YYYY-MM-DD`) |
 | `POST /api/skip` `{ habit_id, date? }` | mark skipped / unskip |
 | `POST /api/habits` | `{ op:"create", name, emoji?, any_days?, all_days? }` → `{ id }`, or `{ op:"delete", id }` |
 | `GET /api/health` | `{ ok: true }` |
 
 `days` = check-in dates, `skips` = skipped dates, `total` counts check-ins only.
+`score` = habit strength 0–100 today, `score_history` = the last 30 days of it, oldest first.
+Both are computed over the full history even when `days=N` clips the date arrays.
 `due_now` = the habit is scheduled for today; a habit that isn't is reported `done_now: true`,
 because there is nothing to do. The app's ring counts only the `due_now` habits.
 
