@@ -117,7 +117,7 @@ describe('habits', () => {
     assert.equal(h.name, 'Read');
     assert.equal(h.emoji, '📖');
     assert.equal(h.done_now, false);
-    assert.deepEqual([h.streak, h.longest, h.total], [0, 0, 0]);
+    assert.deepEqual([h.total, h.score, h.score_history], [0, 0, []]);
   });
 
   test('a name is required', async () => {
@@ -155,7 +155,7 @@ describe('check-ins', () => {
     const today = (await state()).today;
     assert.equal(h.done_now, true);
     assert.deepEqual(h.days, [today]);
-    assert.equal(h.streak, 1);
+    assert.ok(h.score > 0, 'the first check-in puts the strength above 0: ' + h.score);
 
     await s.post('/api/toggle', { habit_id: id });
     [h] = (await state()).habits;
