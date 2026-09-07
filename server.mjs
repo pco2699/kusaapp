@@ -604,11 +604,16 @@ const HTML_SHELL = `<!doctype html>
   .hcell { aspect-ratio:1; border-radius:14px; background:var(--cell); cursor:pointer; transition:transform .1s; }
   /* Streak heat as five classes rather than an inline color-mix() on every filled cell:
      the browser parses these once instead of once per cell. --c comes from .habit. */
-  .hcell.on { background:color-mix(in srgb, var(--c) 40%, var(--mix)); }
-  .hcell.h2 { background:color-mix(in srgb, var(--c) 55%, var(--mix)); }
-  .hcell.h3 { background:color-mix(in srgb, var(--c) 70%, var(--mix)); }
-  .hcell.h4 { background:color-mix(in srgb, var(--c) 85%, var(--mix)); }
-  .hcell.h5 { background:var(--c); }
+  .hcell.on { background:color-mix(in srgb, var(--c) 38%, var(--mix)); }
+  .hcell.h2 { background:color-mix(in srgb, var(--c) 45%, var(--mix)); }
+  .hcell.h3 { background:color-mix(in srgb, var(--c) 52%, var(--mix)); }
+  .hcell.h4 { background:color-mix(in srgb, var(--c) 59%, var(--mix)); }
+  .hcell.h5 { background:color-mix(in srgb, var(--c) 66%, var(--mix)); }
+  .hcell.h6 { background:color-mix(in srgb, var(--c) 73%, var(--mix)); }
+  .hcell.h7 { background:color-mix(in srgb, var(--c) 80%, var(--mix)); }
+  .hcell.h8 { background:color-mix(in srgb, var(--c) 87%, var(--mix)); }
+  .hcell.h9 { background:color-mix(in srgb, var(--c) 94%, var(--mix)); }
+  .hcell.h10 { background:var(--c); }
   .hcell:active { transform:scale(1.15); }
   .hcell.today { box-shadow:0 0 0 2.5px var(--card), 0 0 0 4.5px var(--c); }
   .hcell.skip { background-color:var(--cell); background-image:linear-gradient(to top right, transparent calc(50% - 1.5px), var(--slash) calc(50% - 1.5px) calc(50% + 1.5px), transparent calc(50% + 1.5px)); }
@@ -894,7 +899,8 @@ function dayDiff(a, b){ return Math.round((new Date(b + 'T12:00:00') - new Date(
 // The strength on one day, out of a history that ends on the server's today.
 function scoreOn(h, ds){
   const hist = h.score_history || [];
-  const v = hist[hist.length - 1 - dayDiff(ds, CURRENT ? CURRENT.today : ds)];
+  const back = dayDiff(ds, CURRENT ? CURRENT.today : ds);
+  const v = hist[Math.min(hist.length - 1 - back, hist.length - 1)];
   return typeof v === 'number' ? v : 0;
 }
 
@@ -1085,7 +1091,11 @@ function render(st) {
       // target. Fade and disable that cell just like an unscheduled weekday.
       const off = (allowed && !allowed.has(d.getDay())) ||
         (ds === todayStr && h.any_days && !h.due_now && !set.has(ds));
-      const heat = set.has(ds) ? ' ' + heatClass(hist[hist.length - 1 - (last - i) + shift]) : '';
+      // A day past the end of the history — the browser's calendar is ahead of the
+      // server's, so this cell is "tomorrow" there — has no score of its own yet; the
+      // habit's current one is the honest shade for it.
+      const at = Math.min(hist.length - 1 - (last - i) + shift, hist.length - 1);
+      const heat = set.has(ds) ? ' ' + heatClass(hist[at]) : '';
       parts.push('<div class="hcell' + (off ? ' off' : '') + (skipSet.has(ds) ? ' skip' : '') +
         (ds === todayStr ? ' today' : '') + heat + '" data-d="' + ds + '"></div>');
     }
@@ -1173,13 +1183,15 @@ async function load() {
   render(st);
 }
 
-// 強さベースのヒート: 20%未満=淡い色 → 80%以上=濃い色 (see .hcell.on / .h2-.h5 above).
-// Five buckets rather than a color-mix() per cell: the browser parses the five classes
-// once instead of once per filled day.
-const HEAT_CLASSES = ['on', 'h2', 'h3', 'h4', 'h5'];
+// 強さベースのヒート: 10%ごとに1段階、10%未満=淡い色 → 90%以上=フルカラー
+// (see .hcell.on / .h2-.h10 above). One class per bucket rather than a color-mix() per
+// cell: the browser parses the ten rules once instead of once per filled day. Ten steps
+// of 7% colour is about as fine as these mixes stay apart on a phone screen.
+const HEAT_CLASSES = ['on', 'h2', 'h3', 'h4', 'h5', 'h6', 'h7', 'h8', 'h9', 'h10'];
 function heatClass(score){
   const v = typeof score === 'number' ? score : 0;
-  return 'on' + (v >= 80 ? ' h5' : (v >= 60 ? ' h4' : (v >= 40 ? ' h3' : (v >= 20 ? ' h2' : ''))));
+  const step = Math.min(9, Math.max(0, Math.floor(v / 10)));
+  return step ? 'on h' + (step + 1) : 'on';
 }
 
 // ---------- emoji picker ----------
