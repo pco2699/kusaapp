@@ -7,7 +7,7 @@ A minimal habit tracker that runs as a **single Node.js file** (zero npm depende
 ## Features
 
 - 📱 **Mobile-first UI** — card layout with big tappable cells
-- 🎨 **Strength heatmap** — a filled cell is shaded by the habit's strength *on that day* (under 20% = 40% color → 80%+ = full color), so the board darkens as the habit takes hold and stays dark through the day after a miss
+- 🎨 **Strength heatmap** — a filled cell is shaded by the habit's strength *on that day*, one step per 10% (under 10% = 38% color → 90%+ = full color), so the board darkens as the habit takes hold and stays dark through the day after a miss
 - ✂️ **Skip** — long-press (mobile) / right-click (desktop) to skip a day with a diagonal slash; a skipped day leaves the strength exactly where it was
 - 📆 **Any-of-weekday habits** — e.g. "run on any weekday", "gym on either weekend day". Non-target days are shown faded and rejected by the API. The target is one check-in per *period* (one period per maximal run of allowed weekdays), not per calendar day.
 - 🗓 **All-of-weekday habits** — e.g. "weekdays only": every selected day counts, non-selected days are auto-skipped and cost nothing.
@@ -149,7 +149,7 @@ The first page view is the thing this app is tuned for. What it does:
 - **No `Intl` on the critical path** — building a formatter costs ~75ms on a throttled
   phone. Dates are formatted directly on both sides.
 - Cells are built as one HTML string with delegated event handlers, the heat shade comes
-  from five CSS classes rather than a `color-mix()` per cell (the score for each cell is
+  from ten CSS classes rather than a `color-mix()` per cell (the score for each cell is
   an index into `score_history`, not a date walk), and tooltips are composed on hover
   instead of up front.
 
