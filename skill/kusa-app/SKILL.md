@@ -20,6 +20,9 @@ The app runs in Japanese (`lang: ja`); answer in whichever language they asked i
 **"I was sick / traveling — that one shouldn't count against me."**
 That's `POST /api/skip`, *not* a check-in. A skipped day leaves the strength exactly where it was and doesn't inflate the total. Whenever they explain a miss rather than just admitting one, offer this instead of letting the day count as a zero.
 
+**"I need to stop this one for a while."** / **"しばらく中断したい"**
+`POST /api/freeze` with `habit_id`, a `reason` and a `resume_on` date — both required, and the date can't be in the past. A freeze is a *pause*, not a delete: the paused days cost no strength, the habit drops out of the day's targets, and nothing is lost. Ask when they expect to be back if they haven't said; the app reminds them on that day. `{ op: "unfreeze", habit_id }` brings it back at any time — offer that the moment they mention starting again. Prefer a freeze over a delete whenever they talk about stopping temporarily, and over a run of skips whenever the break is open-ended.
+
 **"How am I doing?"**
 `score` (0–100) is the habit's strength — an exponentially smoothed average of the whole history, the way uhabits does it. `score_history` is the day-by-day version of it, so the trend is right there: compare the last entry with the one ~7 back and say whether it's climbing or slipping. `total` is lifetime check-ins. Read the number honestly: 90%+ is solid, ~50% is a coin flip, and a fall of several points over a week is worth naming.
 
@@ -49,9 +52,10 @@ Auth: `?key=<token>` or `Authorization: Bearer <token>`.
 
 | Call | Does |
 | --- | --- |
-| `GET /api/state` | everything: `{ today, habits: [{ id, name, emoji, any_days, all_days, days, skips, total, score, score_history, due_now, done_now }] }` — `?days=N` widens the window |
+| `GET /api/state` | everything: `{ today, habits: [{ id, name, emoji, any_days, all_days, days, skips, total, score, score_history, due_now, done_now, frozen, freeze, freezes }] }` — `?days=N` widens the window |
 | `POST /api/toggle` `{ habit_id, date? }` | check in / undo; `date` defaults to today (`YYYY-MM-DD`) |
 | `POST /api/skip` `{ habit_id, date? }` | mark skipped / unskip |
+| `POST /api/freeze` | `{ habit_id, reason, resume_on }` pauses (both required, `resume_on` = `YYYY-MM-DD`, not past), or `{ op:"unfreeze", habit_id }` resumes |
 | `POST /api/habits` | `{ op:"create", name, emoji?, any_days?, all_days? }` → `{ id }`, or `{ op:"delete", id }` |
 | `GET /api/health` | `{ ok: true }` |
 
@@ -61,6 +65,11 @@ Auth: `?key=<token>` or `Authorization: Bearer <token>`.
 There is no `streak` or `longest` field — the app has no streak counter.
 `due_now` = the habit is scheduled for today; a habit that isn't is reported `done_now: true`,
 because there is nothing to do. The app's ring counts only the `due_now` habits.
+`frozen` = the habit is paused right now; `freeze` is that pause (`{ since, reason, resume_on, resume_due }`,
+`resume_due` once the planned day has arrived) and `freezes` every pause on record
+(`{ start, end, reason, resume_on }`, `end` exclusive, `null` while open). A paused habit is never
+`due_now` — don't chase them about it, and don't count it as missed; the paused days score nothing
+either way. Check-ins and skips on those days return 400.
 
 ## Gotchas
 

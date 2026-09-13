@@ -38,6 +38,22 @@ CREATE TABLE IF NOT EXISTS checkins (
   UNIQUE(habit_id, date)
 );
 `);
+// A freeze is a *period*, not a flag: an open row (end_date NULL) means the habit is
+// paused right now, and a closed one records the days it was paused for. Keeping the
+// history means the score walk can carry those days across even after the habit is
+// resumed, instead of scoring them as misses in hindsight.
+db.exec(`
+CREATE TABLE IF NOT EXISTS freezes (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  habit_id INTEGER NOT NULL REFERENCES habits(id) ON DELETE CASCADE,
+  start_date TEXT NOT NULL,
+  end_date TEXT,
+  reason TEXT NOT NULL DEFAULT '',
+  resume_on TEXT NOT NULL,
+  created_at TEXT DEFAULT (datetime('now'))
+);
+CREATE INDEX IF NOT EXISTS idx_freezes_habit ON freezes(habit_id);
+`);
 try { db.exec('ALTER TABLE habits ADD COLUMN any_days TEXT'); } catch {}
 try { db.exec('ALTER TABLE checkins ADD COLUMN skip INTEGER DEFAULT 0'); } catch {}
 try { db.exec('ALTER TABLE habits ADD COLUMN all_days TEXT'); } catch {}
@@ -245,6 +261,33 @@ const Q_CHECKIN_ADD = db.prepare('INSERT INTO checkins (habit_id, date) VALUES (
 const Q_SKIP_ADD = db.prepare('INSERT INTO checkins (habit_id, date, skip) VALUES (?, ?, 1)');
 const Q_HABIT_ARCHIVE = db.prepare('UPDATE habits SET archived=1 WHERE id=?');
 const Q_HABIT_ADD = db.prepare('INSERT INTO habits (name, emoji, any_days, all_days) VALUES (?, ?, ?, ?)');
+const Q_FREEZES = db.prepare('SELECT habit_id, start_date, end_date, reason, resume_on FROM freezes ORDER BY start_date');
+const Q_FREEZE_OPEN = db.prepare('SELECT id, start_date, reason, resume_on FROM freezes WHERE habit_id=? AND end_date IS NULL ORDER BY id DESC');
+const Q_FREEZE_ADD = db.prepare('INSERT INTO freezes (habit_id, start_date, reason, resume_on) VALUES (?, ?, ?, ?)');
+const Q_FREEZE_CLOSE = db.prepare('UPDATE freezes SET end_date=? WHERE id=?');
+const Q_FREEZE_DROP = db.prepare('DELETE FROM freezes WHERE id=?');
+const Q_HABIT_EXISTS = db.prepare('SELECT id FROM habits WHERE id=? AND archived=0');
+const Q_FREEZE_AT = db.prepare('SELECT id FROM freezes WHERE habit_id=? AND start_date<=? AND (end_date IS NULL OR end_date>?)');
+
+// Ids arrive from JSON bodies, so anything at all can turn up here. node:sqlite throws
+// on a value it cannot bind — inside the request handler that took the whole server
+// down — so a malformed id is turned into "no such habit" before it reaches a query.
+function habitId(v) {
+  const n = typeof v === 'string' ? Number(v) : v;
+  return Number.isInteger(n) && n > 0 ? n : null;
+}
+
+// A habit's freeze periods as a predicate over dates. `end` is exclusive — the day a
+// habit is resumed on counts again — and an open freeze has no end at all.
+function freezeChecker(ranges) {
+  if (!ranges.length) return null;
+  return (ds) => {
+    for (const r of ranges) {
+      if (ds >= r.start_date && (r.end_date === null || ds < r.end_date)) return true;
+    }
+    return false;
+  };
+}
 
 // `t` is the day to report on ('YYYY-MM-DD'); it defaults to today and is passed
 // explicitly by the tests, which need to ask about a specific weekday.
@@ -253,13 +296,31 @@ function getState(t = today()) {
   const out = [];
   // One scan of checkins bucketed by habit, instead of a query per habit.
   const byHabit = new Map();
-  for (const h of habits) byHabit.set(h.id, { checked: [], skips: [] });
+  for (const h of habits) byHabit.set(h.id, { checked: [], skips: [], freezes: [] });
   for (const r of Q_CHECKINS.all()) {
     const b = byHabit.get(r.habit_id);
     if (b) (r.skip ? b.skips : b.checked).push(r.date);
   }
+  for (const r of Q_FREEZES.all()) {
+    const b = byHabit.get(r.habit_id);
+    if (b) b.freezes.push(r);
+  }
   for (const h of habits) {
-    const { checked, skips } = byHabit.get(h.id);
+    const { checked, skips, freezes } = byHabit.get(h.id);
+    // An open freeze (no end_date) is the habit being paused right now; closed ones only
+    // matter to the score walk, which has to carry those days across.
+    const open = freezes.find(r => r.end_date === null) || null;
+    const frozenOn = freezeChecker(freezes);
+    const fz = {
+      frozen: !!open,
+      freeze: open
+        ? { since: open.start_date, reason: open.reason, resume_on: open.resume_on, resume_due: open.resume_on <= t }
+        : null,
+      freezes: freezes.map(r => ({ start: r.start_date, end: r.end_date, reason: r.reason, resume_on: r.resume_on }))
+    };
+    // A paused habit is nothing to do today, so it drops out of *both* halves of the
+    // day's ring rather than sitting there as a target that can never be met.
+    const push = (rec) => out.push(open ? { ...rec, ...fz, due_now: false, done_now: true } : { ...rec, ...fz });
     let any = null;
     try { any = h.any_days ? parseAnyDays(JSON.parse(h.any_days)) : null; } catch {}
     let all = null;
@@ -272,11 +333,14 @@ function getState(t = today()) {
       // untouched, so a weekends-off habit is never marked down for the weekend.
       const sc = scoreWalk(firstEntry(checked, skips), t, all.length / 7, all.length, (ds, d) => {
         if (!allowed.has(d.getDay())) return null;
+        // A frozen day carries the score across untouched, exactly like a skip: the
+        // point of pausing a habit is that the break costs nothing.
+        if (frozenOn && frozenOn(ds)) return null;
         if (hit.has(ds)) return 1;
         if (skipped.has(ds)) return null;
         return ds === t ? null : 0;
       });
-      out.push({
+      push({
         id: h.id, name: h.name, emoji: h.emoji, any_days: null, all_days: all, total: checked.length,
         score: sc.score, score_history: sc.history,
         days: checked, skips, due_now: due,
@@ -300,12 +364,13 @@ function getState(t = today()) {
       const openKey = todayPi && !satisfied && !skipKeys.has(todayPi.key) ? todayPi.key : null;
       const sc = scoreWalk(firstEntry(checked, skips), t, runs.length / 7, any.length, (ds, d) => {
         if (!allowed.has(d.getDay())) return null;
+        if (frozenOn && frozenOn(ds)) return null;
         const pi = periodInfo(ds, runs);
         if (!pi) return null;
         if (satKeys.has(pi.key) || skipKeys.has(pi.key)) return 1;
         return pi.key === openKey ? null : 0;
       });
-      out.push({
+      push({
         id: h.id, name: h.name, emoji: h.emoji, any_days: any, all_days: null, total: checked.length,
         score: sc.score, score_history: sc.history,
         // A completion made today remains part of today's completed target count; a
@@ -316,11 +381,12 @@ function getState(t = today()) {
     } else {
       const hit = new Set(checked), skipped = new Set(skips);
       const sc = scoreWalk(firstEntry(checked, skips), t, 1, 7, (ds) => {
+        if (frozenOn && frozenOn(ds)) return null;
         if (hit.has(ds)) return 1;
         if (skipped.has(ds)) return null;
         return ds === t ? null : 0;
       });
-      out.push({
+      push({
         id: h.id, name: h.name, emoji: h.emoji, any_days: null, all_days: null, total: checked.length,
         score: sc.score, score_history: sc.history,
         days: checked, skips, due_now: true, done_now: checked.includes(t)
@@ -358,6 +424,8 @@ function sliceState(state, days) {
       ...h,
       days: h.days.filter(d => d >= from),
       skips: h.skips.filter(d => d >= from),
+      // Only the freezes the board can still draw; an open one always overlaps the window.
+      freezes: h.freezes.filter(f => f.end === null || f.end > from),
       score_history: h.score_history.slice(-(days + 1))
     }))
   };
@@ -684,6 +752,24 @@ const HTML_SHELL = `<!doctype html>
   #hmenu button:hover { background:var(--soft); }
   #hmenu button.danger { color:#ef4444; }
 
+  /* A frozen habit stays on the board — that is where it gets resumed from — but it
+     reads as parked: the card is dimmed and its cells are inert. */
+  .habit.frozen .hemoji, .habit.frozen .cells, .habit.frozen .hstr { opacity:.45; }
+  .habit.frozen .htxt .nm { color:var(--sub); }
+  .frztag { display:inline-flex; align-items:center; gap:4px; background:var(--soft); color:var(--sub);
+            border-radius:7px; padding:2px 7px; font-size:11px; font-weight:700; }
+  .hcell.frz { background:transparent; cursor:default; pointer-events:none;
+               box-shadow:inset 0 0 0 1.5px var(--inset);
+               background-image:repeating-linear-gradient(45deg, var(--inset) 0 4px, transparent 4px 8px); }
+  .frzrow { display:flex; flex-direction:column; gap:4px; margin-top:14px; }
+  .frzrow label { font-size:12.5px; font-weight:700; color:var(--sub); }
+  .frzrow input { width:100%; }
+  .frznote { font-size:12.5px; color:var(--sub); line-height:1.6; margin:0 0 4px; white-space:pre-line; }
+  .frzhabit { font-size:15.5px; font-weight:700; margin:-6px 0 10px; overflow-wrap:anywhere; }
+  dialog .hint { font-size:11.5px; color:var(--sub); margin-top:6px; }
+  dialog .err { display:none; color:#ef4444; font-size:12.5px; font-weight:600; margin-top:10px; }
+  dialog .err.on { display:block; }
+
   /* Sits above the floating add button, so neither covers the other. */
   #update-toast { position:fixed; left:50%; transform:translateX(-50%); bottom:calc(88px + env(safe-area-inset-bottom));
                   width:min(420px, calc(100vw - 32px)); z-index:60; display:none;
@@ -777,6 +863,31 @@ const HTML_SHELL = `<!doctype html>
   <menu><button class="ghost" value="ok">OK</button></menu>
 </form></dialog>
 
+<dialog id="freezedlg"><form method="dialog">
+  <h3 id="freeze-title"></h3>
+  <div class="frzhabit" id="freeze-habit"></div>
+  <p class="frznote" id="freeze-note"></p>
+  <div class="frzrow">
+    <label for="freeze-reason" id="freeze-reason-label"></label>
+    <input id="freeze-reason" name="reason" maxlength="200" placeholder="">
+  </div>
+  <div class="frzrow">
+    <label for="freeze-until" id="freeze-until-label"></label>
+    <input id="freeze-until" name="until" type="date">
+    <div class="hint" id="freeze-hint"></div>
+  </div>
+  <div class="err" id="freeze-err"></div>
+  <menu><button class="ghost" type="button" id="freeze-cancel"></button>
+  <button class="primary" value="ok" id="freeze-ok"></button></menu>
+</form></dialog>
+
+<dialog id="reminddlg"><form method="dialog">
+  <h3 id="remind-title"></h3>
+  <p class="frznote" id="remind-body"></p>
+  <menu><button class="ghost" value="later" id="remind-later"></button>
+  <button class="primary" value="resume" id="remind-resume"></button></menu>
+</form></dialog>
+
 <div id="hmenu"></div>
 
 <div id="update-toast" role="status" aria-live="polite">
@@ -809,7 +920,17 @@ const I18N = {
     skip:'スキップ', skipHint:'長押し/右クリックでスキップ',
     strength:'習慣の強さ', strengthCap:'直近30日の推移',
     daySep:'・', anySuffix:'のどれか1回', allSuffix:' すべて',
-    updateReady:'新しいバージョンがあります', updateNow:'更新', updateLater:'あとで', updating:'更新中…'
+    updateReady:'新しいバージョンがあります', updateNow:'更新', updateLater:'あとで', updating:'更新中…',
+    freeze:'中断する', unfreeze:'再開する', freezeTitle:'習慣を中断',
+    freezeNote:'中断した期間は記録に残り、習慣の強さは下がりません。いつでも再開できます。',
+    freezeReason:'中断する理由', freezeReasonPh:'例: 出張のため',
+    freezeUntil:'再開予定日', freezeHint:'その日になったらリマインドします',
+    freezeNeedReason:'理由を入力してください', freezeNeedUntil:'再開予定日を入力してください',
+    freezePast:'再開予定日は今日以降にしてください',
+    frozenTag:'⏸ 中断中', frozenUntil:'再開予定 ', frozenReason:'理由: ',
+    remindTitle:'⏸ 再開の予定日です', remindBody1:'「', remindBody2:'」の再開予定日（',
+    remindBody3:'）になりました。再開しますか？', remindReason:'中断理由: ',
+    remindResume:'再開する', remindLater:'あとで'
   },
   en: {
     themeToggle:'Toggle theme', addHabit:'＋ New habit', newHabit:'New habit', habitName:'Habit name',
@@ -820,7 +941,17 @@ const I18N = {
     skip:'skip', skipHint:'long-press/right-click to skip',
     strength:'Habit strength', strengthCap:'last 30 days',
     daySep:'/', anySuffix:' (any one)', allSuffix:' (all)',
-    updateReady:'A new version is available', updateNow:'Update', updateLater:'Later', updating:'Updating…'
+    updateReady:'A new version is available', updateNow:'Update', updateLater:'Later', updating:'Updating…',
+    freeze:'Pause', unfreeze:'Resume', freezeTitle:'Pause this habit',
+    freezeNote:'The paused days are kept on record and cost no strength. You can resume any time.',
+    freezeReason:'Why are you pausing?', freezeReasonPh:'e.g. away on a trip',
+    freezeUntil:'Planned resume date', freezeHint:'You will be reminded on that day',
+    freezeNeedReason:'Please enter a reason', freezeNeedUntil:'Please pick a resume date',
+    freezePast:'The resume date cannot be in the past',
+    frozenTag:'⏸ Paused', frozenUntil:'resumes ', frozenReason:'reason: ',
+    remindTitle:'⏸ Time to resume', remindBody1:'"', remindBody2:'" was paused until ',
+    remindBody3:'. Resume it now?', remindReason:'Paused because: ',
+    remindResume:'Resume', remindLater:'Later'
   }
 };
 function t(k){ var d = I18N[LANG] || I18N.en; return (d && d[k] !== undefined) ? d[k] : k; }
@@ -842,6 +973,17 @@ function applyI18n(){
   document.getElementById('update-text').textContent = t('updateReady');
   document.getElementById('update-later').textContent = t('updateLater');
   document.getElementById('update-now').textContent = t('updateNow');
+  document.getElementById('freeze-title').textContent = t('freezeTitle');
+  document.getElementById('freeze-note').textContent = t('freezeNote');
+  document.getElementById('freeze-reason-label').textContent = t('freezeReason');
+  document.getElementById('freeze-reason').placeholder = t('freezeReasonPh');
+  document.getElementById('freeze-until-label').textContent = t('freezeUntil');
+  document.getElementById('freeze-hint').textContent = t('freezeHint');
+  document.getElementById('freeze-cancel').textContent = t('cancel');
+  document.getElementById('freeze-ok').textContent = t('freeze');
+  document.getElementById('remind-title').textContent = t('remindTitle');
+  document.getElementById('remind-later').textContent = t('remindLater');
+  document.getElementById('remind-resume').textContent = t('remindResume');
 }
 
 const PALETTE = ['#ff6b6b','#f59e0b','#10b981','#3b82f6','#8b5cf6','#ec4899','#14b8a6','#f97316','#6366f1','#84cc16'];
@@ -975,6 +1117,32 @@ function buildDates(days, todayStr){
   el.innerHTML = parts.join('');
 }
 
+// ---------- freeze ----------
+// The server ships freeze *periods* (end is exclusive, null while the pause is open);
+// the board turns them back into a per-day predicate.
+function freezeFn(ranges){
+  const rs = Array.isArray(ranges) ? ranges : [];
+  if (!rs.length) return function(){ return false; };
+  return function(ds){
+    for (const r of rs) { if (ds >= r.start && (r.end === null || ds < r.end)) return true; }
+    return false;
+  };
+}
+// "⏸ 中断中 · 再開予定 9/20 · 理由: 出張のため"
+function frozenSub(h){
+  const f = h.freeze || {};
+  const parts = ['<span class="frztag">' + esc(t('frozenTag')) + '</span>'];
+  if (f.resume_on) parts.push(esc(t('frozenUntil') + shortDate(f.resume_on)));
+  if (f.reason) parts.push(esc(t('frozenReason') + f.reason));
+  return parts.join(' · ');
+}
+function shortDate(ds){
+  const p = ds.split('-');
+  if (p.length !== 3) return ds;
+  const m = Number(p[1]), d = Number(p[2]);
+  return LANG === 'en' ? m + '/' + d : m + '月' + d + '日';
+}
+
 function anyLabel(any){
   const names = any.map(function(w){ return DOW[w]; }).join(t('daySep'));
   return names + t('anySuffix');
@@ -1031,8 +1199,10 @@ function render(st) {
     const allowed = h.any_days ? new Set(h.any_days) : (h.all_days ? new Set(h.all_days) : null);
     if (h.due_now) { due++; if (h.done_now) done++; }
 
+    const frozenOn = freezeFn(h.freezes);
+
     const block = document.createElement('div');
-    block.className = 'habit';
+    block.className = 'habit' + (h.frozen ? ' frozen' : '');
     block.style.setProperty('--c', color);
 
     const head = document.createElement('div'); head.className = 'hhead';
@@ -1040,9 +1210,12 @@ function render(st) {
     em.style.background = 'color-mix(in srgb, ' + color + ' 14%, var(--mix))';
     em.textContent = h.emoji || '✨';
     const txt = document.createElement('div'); txt.className = 'htxt';
+    // A paused habit says so in place of its schedule: what matters about it now is why
+    // it is paused and when it is meant to come back.
+    const sub = h.frozen ? frozenSub(h)
+      : (h.any_days ? esc(anyLabel(h.any_days)) : (h.all_days ? esc(allLabel(h.all_days)) : ''));
     txt.innerHTML = '<div class="nm">' + esc(h.name) + '</div>' +
-      (h.any_days ? '<div class="sub">' + esc(anyLabel(h.any_days)) + '</div>' :
-       (h.all_days ? '<div class="sub">' + esc(allLabel(h.all_days)) + '</div>' : ''));
+      (sub ? '<div class="sub">' + sub + '</div>' : '');
     const info = document.createElement('button'); info.className = 'hbtn info'; info.textContent = 'ⓘ'; info.title = t('stats');
     info.addEventListener('click', function(){ showStats(h, color); });
     const menu = document.createElement('button'); menu.className = 'hbtn menu'; menu.textContent = '⋮'; menu.title = t('more');
@@ -1089,15 +1262,17 @@ function render(st) {
       const d = days[i];
       // Once an any-of period was completed on an earlier day, today is no longer a
       // target. Fade and disable that cell just like an unscheduled weekday.
-      const off = (allowed && !allowed.has(d.getDay())) ||
-        (ds === todayStr && h.any_days && !h.due_now && !set.has(ds));
+      const frz = frozenOn(ds);
+      const off = !frz && ((allowed && !allowed.has(d.getDay())) ||
+        (ds === todayStr && h.any_days && !h.due_now && !set.has(ds)));
       // A day past the end of the history — the browser's calendar is ahead of the
       // server's, so this cell is "tomorrow" there — has no score of its own yet; the
       // habit's current one is the honest shade for it.
       const at = Math.min(hist.length - 1 - (last - i) + shift, hist.length - 1);
       const heat = set.has(ds) ? ' ' + heatClass(hist[at]) : '';
-      parts.push('<div class="hcell' + (off ? ' off' : '') + (skipSet.has(ds) ? ' skip' : '') +
-        (ds === todayStr ? ' today' : '') + heat + '" data-d="' + ds + '"></div>');
+      parts.push('<div class="hcell' + (off ? ' off' : '') + (frz ? ' frz' : '') +
+        (!frz && skipSet.has(ds) ? ' skip' : '') +
+        (ds === todayStr ? ' today' : '') + (frz ? '' : heat) + '" data-d="' + ds + '"></div>');
     }
     cells.innerHTML = parts.join('');
     block.appendChild(cells);
@@ -1181,6 +1356,7 @@ async function load() {
   lastStateJson = j;
   CURRENT = st;
   render(st);
+  maybeRemind();
 }
 
 // 強さベースのヒート: 10%ごとに1段階、10%未満=淡い色 → 90%以上=フルカラー
@@ -1266,6 +1442,15 @@ function openMenu(h, x, y){
   menuCtx = h;
   const m = document.getElementById('hmenu');
   m.innerHTML = '';
+  // Pausing needs a reason and a date, so it opens a dialog; resuming is a single tap,
+  // because a paused habit must be trivially easy to bring back.
+  const f = document.createElement('button');
+  f.textContent = h.frozen ? t('unfreeze') : t('freeze');
+  f.addEventListener('click', function(){
+    closeMenu();
+    if (h.frozen) doUnfreeze(h.id); else openFreeze(h);
+  });
+  m.appendChild(f);
   const b = document.createElement('button');
   b.textContent = t('delete');
   b.className = 'danger';
@@ -1273,7 +1458,7 @@ function openMenu(h, x, y){
   m.appendChild(b);
   m.classList.add('open');
   m.style.left = Math.min(x, window.innerWidth - 170) + 'px';
-  m.style.top = Math.min(y, window.innerHeight - 70) + 'px';
+  m.style.top = Math.min(y, window.innerHeight - 100) + 'px';
 }
 function closeMenu(){
   document.getElementById('hmenu').classList.remove('open');
@@ -1281,6 +1466,87 @@ function closeMenu(){
 }
 function doDelete(id, name){
   if (confirm(t('delConfirm1') + name + t('delConfirm2'))) apiWrite('/api/habits',{op:'delete',id:id}).then(load);
+}
+
+// ---------- freeze dialog ----------
+let freezeCtx = null;
+// A week out is the common case for "away for a bit", and a prefilled date means the
+// required field is one tap for anyone who agrees with it.
+function defaultResume(){
+  const d = new Date(((CURRENT && CURRENT.today) || fmt(new Date())) + 'T12:00:00');
+  d.setDate(d.getDate() + 7);
+  return fmt(d);
+}
+function openFreeze(h){
+  freezeCtx = h;
+  const f = h.freeze || {};
+  document.getElementById('freeze-habit').textContent = (h.emoji || '✨') + ' ' + h.name;
+  const reason = document.getElementById('freeze-reason');
+  const until = document.getElementById('freeze-until');
+  reason.value = f.reason || '';
+  until.value = f.resume_on || defaultResume();
+  until.min = (CURRENT && CURRENT.today) || fmt(new Date());
+  freezeErr('');
+  document.getElementById('freezedlg').showModal();
+  setTimeout(function(){ reason.focus(); }, 0);
+}
+function freezeErr(msg){
+  const el = document.getElementById('freeze-err');
+  el.textContent = msg;
+  el.classList.toggle('on', !!msg);
+}
+function submitFreeze(){
+  if (!freezeCtx) return;
+  const reason = document.getElementById('freeze-reason').value.trim();
+  const until = document.getElementById('freeze-until').value;
+  const t0 = (CURRENT && CURRENT.today) || fmt(new Date());
+  if (!reason) return freezeErr(t('freezeNeedReason'));
+  if (!/^\\d{4}-\\d{2}-\\d{2}$/.test(until)) return freezeErr(t('freezeNeedUntil'));
+  if (until < t0) return freezeErr(t('freezePast'));
+  const id = freezeCtx.id;
+  // A pause that is already due on the day it starts should not bounce straight back as
+  // a reminder; the user has just said as much in this dialog.
+  if (until <= t0) dismissRemind(id, t0);
+  document.getElementById('freezedlg').close();
+  freezeCtx = null;
+  apiWrite('/api/freeze', { habit_id: id, reason: reason, resume_on: until }).then(function(r){
+    if (!r || !r.queued) load();
+  });
+}
+function doUnfreeze(id){
+  apiWrite('/api/freeze', { op: 'unfreeze', habit_id: id }).then(function(r){
+    if (!r || !r.queued) load();
+  });
+}
+
+// ---------- resume reminder ----------
+// The server marks a freeze resume_due once its planned day arrives. Each habit asks at
+// most once a day: "later" is remembered per device for the rest of the day.
+const REMIND_KEY = 'freezeRemind';
+function remindMap(){ try { return JSON.parse(localStorage.getItem(REMIND_KEY) || '{}'); } catch (e) { return {}; } }
+function dismissRemind(id, day){
+  const m = remindMap();
+  m[id] = day;
+  try { localStorage.setItem(REMIND_KEY, JSON.stringify(m)); } catch (e) {}
+}
+let remindQueue = [];
+function maybeRemind(){
+  if (!CURRENT) return;
+  const m = remindMap();
+  remindQueue = CURRENT.habits.filter(function(h){
+    return h.frozen && h.freeze && h.freeze.resume_due && m[h.id] !== CURRENT.today;
+  });
+  showNextRemind();
+}
+function showNextRemind(){
+  const dlg = document.getElementById('reminddlg');
+  if (!remindQueue.length || dlg.open) return;
+  const h = remindQueue[0];
+  document.getElementById('remind-title').textContent = t('remindTitle');
+  document.getElementById('remind-body').textContent =
+    t('remindBody1') + h.name + t('remindBody2') + shortDate(h.freeze.resume_on) + t('remindBody3') +
+    (h.freeze.reason ? '\\n' + t('remindReason') + h.freeze.reason : '');
+  dlg.showModal();
 }
 // ---------- deferred wiring ----------
 // None of this is needed to paint the board: the dialogs are closed and the menu is
@@ -1340,6 +1606,25 @@ document.getElementById('adddlg').addEventListener('close', e => {
   apiWrite('/api/habits', { op:'create', name: name, emoji: emoji, any_days: any, all_days: all }).then(r => {
     if (!r || !r.queued) load();
   });
+});
+// method="dialog" would close the dialog on submit; preventing that keeps a half-filled
+// freeze form open with its error showing instead of silently dropping it.
+document.getElementById('freezedlg').querySelector('form').addEventListener('submit', e => {
+  e.preventDefault();
+  submitFreeze();
+});
+document.getElementById('freezedlg').querySelector('.ghost').addEventListener('click', () => {
+  freezeCtx = null;
+  document.getElementById('freezedlg').close();
+});
+document.getElementById('reminddlg').addEventListener('close', e => {
+  const h = remindQueue.shift();
+  if (h) {
+    if (document.getElementById('reminddlg').returnValue === 'resume') doUnfreeze(h.id);
+    else dismissRemind(h.id, CURRENT ? CURRENT.today : fmt(new Date()));
+  }
+  // Several habits can come due on the same day; ask about them one after the other.
+  setTimeout(showNextRemind, 250);
 });
 document.getElementById('authdlg').addEventListener('close', e => {
   const inp = document.querySelector('#authdlg input[name=key]');
@@ -1440,6 +1725,7 @@ if (window.__STATE__) {
 requestAnimationFrame(function(){
   setTimeout(function(){
     wireDialogs();
+    maybeRemind();   // the inlined state may already carry a freeze whose day has come
     load();          // revalidate; a no-op re-render when nothing moved
     flushQ();
     setupSW();
@@ -1511,42 +1797,83 @@ const server = createServer(async (req, res) => {
 
   if (req.method === 'POST' && p === '/api/toggle') {
     const b = await body(req);
-    const h = Q_HABIT_DAYS.get(b.habit_id);
+    const id = habitId(b.habit_id);
+    const h = id && Q_HABIT_DAYS.get(id);
     if (!h) return json(res, 404, { error: 'habit not found' });
     const date = /^\d{4}-\d{2}-\d{2}$/.test(b.date || '') ? b.date : today();
     const any = h.any_days ? parseAnyDays(JSON.parse(h.any_days)) : null;
     const all = h.all_days ? parseAnyDays(JSON.parse(h.all_days)) : null;
     const sched = any || all;
     if (sched && !sched.includes(new Date(date + 'T12:00:00').getDay())) return json(res, 400, { error: 'not an allowed day for this habit' });
-    const exists = Q_CHECKIN_ONE.get(b.habit_id, date);
-    if (exists) Q_CHECKIN_DEL.run(b.habit_id, date);
-    else Q_CHECKIN_ADD.run(b.habit_id, date);
+    if (Q_FREEZE_AT.get(id, date, date)) return json(res, 400, { error: 'habit is frozen on that day' });
+    const exists = Q_CHECKIN_ONE.get(id, date);
+    if (exists) Q_CHECKIN_DEL.run(id, date);
+    else Q_CHECKIN_ADD.run(id, date);
     invalidateState();
     return json(res, 200, { ok: true });
   }
 
   if (req.method === 'POST' && p === '/api/skip') {
     const b = await body(req);
-    const h = Q_HABIT_DAYS.get(b.habit_id);
+    const id = habitId(b.habit_id);
+    const h = id && Q_HABIT_DAYS.get(id);
     if (!h) return json(res, 404, { error: 'habit not found' });
     const date = /^\d{4}-\d{2}-\d{2}$/.test(b.date || '') ? b.date : today();
     const any = h.any_days ? parseAnyDays(JSON.parse(h.any_days)) : null;
     const all = h.all_days ? parseAnyDays(JSON.parse(h.all_days)) : null;
     const sched = any || all;
     if (sched && !sched.includes(new Date(date + 'T12:00:00').getDay())) return json(res, 400, { error: 'not an allowed day for this habit' });
-    const existing = Q_CHECKIN_ONE.get(b.habit_id, date);
-    Q_CHECKIN_DEL.run(b.habit_id, date);
+    if (Q_FREEZE_AT.get(id, date, date)) return json(res, 400, { error: 'habit is frozen on that day' });
+    const existing = Q_CHECKIN_ONE.get(id, date);
+    Q_CHECKIN_DEL.run(id, date);
     if (!(existing && existing.skip)) {
-      Q_SKIP_ADD.run(b.habit_id, date);
+      Q_SKIP_ADD.run(id, date);
     }
     invalidateState();
     return json(res, 200, { ok: true });
   }
 
+  // Pausing a habit. `reason` and `resume_on` are both required on the way in: a freeze
+  // with no stated reason and no planned return is how a habit quietly dies.
+  if (req.method === 'POST' && p === '/api/freeze') {
+    const b = await body(req);
+    const id = habitId(b.habit_id);
+    if (!id || !Q_HABIT_EXISTS.get(id)) return json(res, 404, { error: 'habit not found' });
+    const t = today();
+    const open = Q_FREEZE_OPEN.all(id);
+    if (b.op === 'unfreeze') {
+      // End the freeze *today*, exclusive: the habit counts again from this morning.
+      // A freeze resumed on the day it started never happened, so it leaves no trace.
+      for (const f of open) {
+        if (f.start_date >= t) Q_FREEZE_DROP.run(f.id);
+        else Q_FREEZE_CLOSE.run(t, f.id);
+      }
+      invalidateState();
+      return json(res, 200, { ok: true, frozen: false });
+    }
+    const reason = (b.reason || '').trim();
+    if (!reason) return json(res, 400, { error: 'reason required' });
+    const resumeOn = String(b.resume_on || '');
+    if (!/^\d{4}-\d{2}-\d{2}$/.test(resumeOn)) return json(res, 400, { error: 'resume_on required (YYYY-MM-DD)' });
+    if (resumeOn < t) return json(res, 400, { error: 'resume_on must not be in the past' });
+    if (open.length) {
+      // Already frozen: treat this as an edit of the running freeze rather than a second
+      // overlapping one.
+      for (const f of open) Q_FREEZE_DROP.run(f.id);
+      Q_FREEZE_ADD.run(id, open[open.length - 1].start_date, reason, resumeOn);
+    } else {
+      Q_FREEZE_ADD.run(id, t, reason, resumeOn);
+    }
+    invalidateState();
+    return json(res, 200, { ok: true, frozen: true, resume_on: resumeOn });
+  }
+
   if (req.method === 'POST' && p === '/api/habits') {
     const b = await body(req);
     if (b.op === 'delete' && b.id) {
-      Q_HABIT_ARCHIVE.run(b.id);
+      const id = habitId(b.id);
+      if (!id) return json(res, 404, { error: 'habit not found' });
+      Q_HABIT_ARCHIVE.run(id);
       invalidateState();
       return json(res, 200, { ok: true });
     }

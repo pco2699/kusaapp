@@ -9,6 +9,7 @@ let settings = null;
 let state = null;
 
 function scheduleLabel(h) {
+  if (h.frozen) return 'Paused';
   if (h.any_days) {
     if (h.any_days.length === 5 && [1, 2, 3, 4, 5].every(d => h.any_days.includes(d))) return 'Any weekday';
     return 'Any of: ' + h.any_days.map(d => DAY_LABELS[d]).join(' ');

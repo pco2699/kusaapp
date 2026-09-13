@@ -267,3 +267,110 @@ describe('transport', () => {
     assert.equal(r.headers.get('access-control-allow-origin'), '*');
   });
 });
+
+describe('freeze', () => {
+  // The API works against the server's own today, so the dates here are relative to it.
+  const today = () => state().then(st => st.today);
+  const plus = (ds, n) => {
+    const d = new Date(ds + 'T12:00:00');
+    d.setDate(d.getDate() + n);
+    const m = d.getMonth() + 1, day = d.getDate();
+    return d.getFullYear() + '-' + (m < 10 ? '0' : '') + m + '-' + (day < 10 ? '0' : '') + day;
+  };
+  const freeze = (body) => s.post('/api/freeze', body);
+  const first = async () => (await state()).habits[0];
+
+  test('a freeze needs a reason', async () => {
+    const { id } = await (await create({ name: 'Gym' })).json();
+    const r = await freeze({ habit_id: id, resume_on: plus(await today(), 3) });
+    assert.equal(r.status, 400);
+    assert.deepEqual(await r.json(), { error: 'reason required' });
+    assert.equal((await first()).frozen, false, 'nothing was frozen');
+  });
+
+  test('a freeze needs a resume date, and not one in the past', async () => {
+    const { id } = await (await create({ name: 'Gym' })).json();
+    const t = await today();
+    assert.equal((await freeze({ habit_id: id, reason: 'trip' })).status, 400);
+    assert.equal((await freeze({ habit_id: id, reason: 'trip', resume_on: 'soon' })).status, 400);
+    const past = await freeze({ habit_id: id, reason: 'trip', resume_on: plus(t, -1) });
+    assert.equal(past.status, 400);
+    assert.deepEqual(await past.json(), { error: 'resume_on must not be in the past' });
+    assert.equal((await first()).frozen, false);
+  });
+
+  test('freezing parks the habit with its reason and resume date', async () => {
+    const { id } = await (await create({ name: 'Gym' })).json();
+    const t = await today();
+    const r = await freeze({ habit_id: id, reason: '出張のため', resume_on: plus(t, 5) });
+    assert.equal(r.status, 200);
+    const h = await first();
+    assert.equal(h.frozen, true);
+    assert.equal(h.freeze.reason, '出張のため');
+    assert.equal(h.freeze.resume_on, plus(t, 5));
+    assert.equal(h.freeze.since, t, 'the pause starts today');
+    assert.equal(h.freeze.resume_due, false);
+    assert.equal(h.due_now, false, 'and it is no longer a target for today');
+  });
+
+  test('a resume date of today is reported as due right away', async () => {
+    const { id } = await (await create({ name: 'Gym' })).json();
+    const t = await today();
+    await freeze({ habit_id: id, reason: 'trip', resume_on: t });
+    assert.equal((await first()).freeze.resume_due, true);
+  });
+
+  test('check-ins and skips are refused while the habit is frozen', async () => {
+    const { id } = await (await create({ name: 'Gym' })).json();
+    await freeze({ habit_id: id, reason: 'trip', resume_on: plus(await today(), 5) });
+    for (const p of ['/api/toggle', '/api/skip']) {
+      const r = await s.post(p, { habit_id: id });
+      assert.equal(r.status, 400, p + ' should be refused');
+      assert.deepEqual(await r.json(), { error: 'habit is frozen on that day' });
+    }
+    assert.equal((await first()).total, 0);
+  });
+
+  test('re-freezing edits the running pause instead of stacking a second one', async () => {
+    const { id } = await (await create({ name: 'Gym' })).json();
+    const t = await today();
+    await freeze({ habit_id: id, reason: 'trip', resume_on: plus(t, 5) });
+    await freeze({ habit_id: id, reason: 'longer trip', resume_on: plus(t, 12) });
+    const h = await first();
+    assert.equal(h.freezes.length, 1, 'still one pause');
+    assert.equal(h.freeze.since, t, 'which still started when it did');
+    assert.equal(h.freeze.reason, 'longer trip');
+    assert.equal(h.freeze.resume_on, plus(t, 12));
+  });
+
+  test('a habit can be resumed at any time, and the same-day pause leaves no trace', async () => {
+    const { id } = await (await create({ name: 'Gym' })).json();
+    await freeze({ habit_id: id, reason: 'trip', resume_on: plus(await today(), 9) });
+    const r = await freeze({ op: 'unfreeze', habit_id: id });
+    assert.equal(r.status, 200);
+    const h = await first();
+    assert.equal(h.frozen, false);
+    assert.equal(h.freeze, null);
+    assert.equal(h.due_now, true, 'the habit is a target again');
+    assert.deepEqual(h.freezes, [], 'a pause resumed the day it began is not history');
+    assert.equal((await s.post('/api/toggle', { habit_id: id })).status, 200, 'and today can be checked in');
+  });
+
+  test('a malformed habit id is a 404, not a crash', async () => {
+    // node:sqlite throws on a value it cannot bind, and inside the request handler that
+    // took the whole server down — every write route has to screen the id first.
+    for (const bad of [undefined, null, 'abc', {}, [1], 1.5]) {
+      assert.equal((await s.post('/api/freeze', { habit_id: bad, reason: 'trip', resume_on: '2099-01-01' })).status, 404);
+      assert.equal((await s.post('/api/toggle', { habit_id: bad })).status, 404);
+      assert.equal((await s.post('/api/skip', { habit_id: bad })).status, 404);
+      // A delete with no id at all is not a delete; the route falls through to create.
+      if (bad) assert.equal((await s.post('/api/habits', { op: 'delete', id: bad })).status, 404);
+    }
+    assert.deepEqual(await (await fetch(s.url('/api/health'))).json(), { ok: true }, 'the server is still up');
+  });
+
+  test('freezing an unknown habit is a 404', async () => {
+    const r = await freeze({ habit_id: 999999, reason: 'trip', resume_on: plus(await today(), 2) });
+    assert.equal(r.status, 404);
+  });
+});
