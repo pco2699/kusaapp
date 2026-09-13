@@ -18,6 +18,7 @@ A minimal habit tracker that runs as a **single Node.js file** (zero npm depende
   stats popup. A miss dents it instead of erasing it, so there is still something to
   protect on the day after a bad week. There is no consecutive-day counter anywhere
 - 📊 Daily progress ring + lifetime check-in count per habit
+- 🔀 **Sort & filter** — a 28px strip folded above the date row (collapsed by default, so the board stays the board). Sort by your **own order** (⇅ — rearrange with ▲▼ while the strip is open, saved server-side), by **strength** (💪) or by **the order you added them** (🕒); show **only what's due today** (🎯) or **everything** (📋). It's all icons, with an ⓘ legend, and an active filter keeps showing its icon on the collapsed strip so a short board is never a mystery
 - 📶 **PWA + offline** — installable (manifest + service worker), reads from cache when offline, and queues check-ins/skips in `localStorage` to flush when back online
 - 🔄 **Update prompt** — a deploy changes the fingerprint baked into `sw.js`, so the new worker installs and waits; the open app offers "新しいバージョンがあります / A new version is available" and only swaps in and reloads when you accept
 - 🌓 **Dark / light theme** — toggle in the header (🌙/☀️), follows the system preference by default, persisted per device (`?theme=dark|light` also works)
@@ -100,7 +101,10 @@ names, so nothing touches your `habits.db`.
     every pause as `freezes: [{ start, end, reason, resume_on }]`, `end` exclusive and `null` while open
   - a paused habit is `due_now: false` / `done_now: true`, and `/api/toggle` and `/api/skip` are
     refused for its paused days
-- `POST /api/habits` — `{ op: "create", name, emoji?, any_days?: number[], all_days?: number[] }` or `{ op: "delete", id }`
+- `POST /api/habits` — `{ op: "create", name, emoji?, any_days?: number[], all_days?: number[] }`, `{ op: "delete", id }` or `{ op: "reorder", ids: number[] }`
+  - `reorder` takes the habits in the order you want them and writes that to the `sort`
+    column; `/api/state` returns habits in that order (`sort`, then `id`). A new habit
+    takes the next free slot, so it lands after the ones already arranged
   - `any_days`: array of weekday numbers (0=Sun … 6=Sat) — one hit on any of these days counts
   - `all_days`: array of weekday numbers — every selected day counts; non-selected days are auto-skipped
   - both omitted/null → daily habit
