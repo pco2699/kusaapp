@@ -659,12 +659,17 @@ const HTML_SHELL = `<!doctype html>
   .legend .lb { color:var(--sub); line-height:1.5; }
   .legend .hd { grid-column:1 / -1; font-size:11.5px; font-weight:700; color:var(--sub); letter-spacing:.04em; margin-top:4px; }
   .legend .hd:first-child { margin-top:0; }
-  /* Only in manual order: two chevrons stacked in one narrow column, so reordering costs
-     the header ~24px and no menu round trip. */
-  .hmove { display:flex; flex-direction:column; gap:2px; flex:none; }
-  .hmove button { width:26px; height:21px; border:none; border-radius:7px; background:var(--soft); color:var(--sub);
-                  font-size:11px; line-height:1; padding:0; cursor:pointer; }
-  .hmove button[disabled] { opacity:.3; cursor:default; }
+  /* Only in manual order: the three-bar grip every list uses for "drag me". touch-action
+     is what lets a drag off the handle move the card instead of scrolling the page. */
+  .hgrip { flex:none; width:30px; height:34px; border:none; border-radius:9px; background:var(--soft); color:var(--sub);
+           display:flex; align-items:center; justify-content:center; padding:0; cursor:grab; touch-action:none; }
+  .hgrip:active { cursor:grabbing; }
+  .hgrip svg { display:block; fill:currentColor; }
+  .habit.dragging { position:relative; z-index:20; background:var(--card); border-radius:16px;
+                    box-shadow:0 12px 30px rgba(20,30,60,.22); content-visibility:visible; }
+  .habit.dragging .hgrip { cursor:grabbing; background:var(--btn); color:var(--btn-tx); }
+  /* The card under the finger must not be picked up as text along the way. */
+  body.dragging, body.dragging * { user-select:none; }
 
   .dates { display:grid; grid-template-columns:repeat(var(--n,7), minmax(0,64px)); justify-content:center; gap:6px; padding:14px 14px 10px; border-bottom:1px solid var(--line); }
   .dates.dense .dow { display:none; }
@@ -983,7 +988,7 @@ const I18N = {
     strength:'習慣の強さ', strengthCap:'直近30日の推移',
     daySep:'・', anySuffix:'のどれか1回', allSuffix:' すべて',
     updateReady:'新しいバージョンがあります', updateNow:'更新', updateLater:'あとで', updating:'更新中…',
-    freeze:'中断する', unfreeze:'再開する', freezeTitle:'習慣を中断',
+    freeze:'中断', unfreeze:'再開', freezeTitle:'習慣を中断',
     freezeNote:'中断した期間は記録に残り、習慣の強さは下がりません。いつでも再開できます。',
     freezeReason:'中断する理由', freezeReasonPh:'例: 出張のため',
     freezeUntil:'再開予定日', freezeHint:'その日になったらリマインドします',
@@ -992,12 +997,12 @@ const I18N = {
     frozenTag:'⏸ 中断中', frozenUntil:'再開予定 ', frozenReason:'理由: ',
     remindTitle:'⏸ 再開の予定日です', remindBody1:'「', remindBody2:'」の再開予定日（',
     remindBody3:'）になりました。再開しますか？', remindReason:'中断理由: ',
-    remindResume:'再開する', remindLater:'あとで',
+    remindResume:'再開', remindLater:'あとで',
     viewTools:'並べ替えと絞り込み', legendTitle:'アイコンの説明',
     sortHead:'並べ替え', filterHead:'表示',
-    sortCustom:'自分で並べた順（このパネルを開くと▲▼で入れ替え）', sortScore:'習慣の強さが高い順', sortCreated:'追加した順',
+    sortCustom:'自分で並べた順（このパネルを開くと ☰ をドラッグして入れ替え）', sortScore:'習慣の強さが高い順', sortCreated:'追加した順',
     filterToday:'今日やるべき習慣だけ', filterAll:'すべての習慣',
-    moveUp:'上へ', moveDown:'下へ', emptyToday:'🎯 今日やるべき習慣はありません'
+    dragHint:'ドラッグで並べ替え（↑↓キーでも移動できます）', emptyToday:'🎯 今日やるべき習慣はありません'
   },
   en: {
     themeToggle:'Toggle theme', addHabit:'＋ New habit', newHabit:'New habit', habitName:'Habit name',
@@ -1021,9 +1026,9 @@ const I18N = {
     remindResume:'Resume', remindLater:'Later',
     viewTools:'Sort and filter', legendTitle:'What the icons mean',
     sortHead:'Sort', filterHead:'Show',
-    sortCustom:'Your own order (rearrange with ▲▼ while this panel is open)', sortScore:'Strongest habits first', sortCreated:'The order you added them',
+    sortCustom:'Your own order (drag the ☰ grip while this panel is open)', sortScore:'Strongest habits first', sortCreated:'The order you added them',
     filterToday:"Only what's due today", filterAll:'Every habit',
-    moveUp:'Move up', moveDown:'Move down', emptyToday:'🎯 Nothing is due today'
+    dragHint:'Drag to reorder (or use the arrow keys)', emptyToday:'🎯 Nothing is due today'
   }
 };
 function t(k){ var d = I18N[LANG] || I18N.en; return (d && d[k] !== undefined) ? d[k] : k; }
@@ -1282,6 +1287,112 @@ function moveHabit(h, dir){
     if (!r || !r.queued) load();
   });
 }
+// ---------- drag to reorder ----------
+// Pointer events rather than HTML5 drag-and-drop, which never fires on touch — and this
+// is a phone-first board. The card follows the finger by transform, and whenever its
+// middle passes a neighbour's middle the two swap in the DOM there and then, so what you
+// see during the drag is already the order you are going to get.
+let drag = null;
+function habitBlocks(){
+  return Array.prototype.filter.call(document.getElementById('rows').children,
+    function(el){ return el.classList && el.classList.contains('habit'); });
+}
+function startDrag(e, block, h){
+  if (drag || (e.button !== undefined && e.button > 0)) return;
+  e.preventDefault();
+  drag = { block: block, h: h, startY: e.clientY, tx: 0, lastY: e.clientY, moved: false, id: e.pointerId };
+  block.classList.add('dragging');
+  document.body.classList.add('dragging');
+  try { e.currentTarget.setPointerCapture(e.pointerId); } catch (e2) {}
+  requestAnimationFrame(dragScroll);
+}
+function dragTo(y){
+  drag.tx = y - drag.startY;
+  drag.block.style.transform = 'translateY(' + drag.tx + 'px)';
+}
+// Moving the card in the DOM changes where its layout puts it, so the translation is
+// rebased by exactly that jump — otherwise the card would leap out from under the finger
+// on every swap.
+function reseat(move){
+  const before = drag.block.getBoundingClientRect().top - drag.tx;
+  move();
+  const after = drag.block.getBoundingClientRect().top - drag.tx;
+  drag.startY += after - before;
+  dragTo(drag.lastY);
+}
+function dragSwap(){
+  const rows = document.getElementById('rows');
+  const r = drag.block.getBoundingClientRect();
+  const mid = r.top + r.height / 2;
+  const blocks = habitBlocks();
+  const i = blocks.indexOf(drag.block);
+  const prev = blocks[i - 1], next = blocks[i + 1];
+  if (prev) {
+    const pr = prev.getBoundingClientRect();
+    if (mid < pr.top + pr.height / 2) return reseat(function(){ rows.insertBefore(drag.block, prev); });
+  }
+  if (next) {
+    const nr = next.getBoundingClientRect();
+    if (mid > nr.top + nr.height / 2) return reseat(function(){ rows.insertBefore(drag.block, next.nextSibling); });
+  }
+}
+// A finger parked near the top or bottom edge keeps the page moving, so a habit can be
+// dragged past the end of the screen on a long board.
+function dragScroll(){
+  if (!drag) return;
+  const h = window.innerHeight;
+  const y = drag.lastY;
+  let d = 0;
+  if (y < 80) d = -Math.min(16, (80 - y) / 4);
+  else if (y > h - 80) d = Math.min(16, (y - (h - 80)) / 4);
+  if (d) {
+    const was = window.scrollY;
+    window.scrollBy(0, d);
+    // The page moved under the pointer; the card has to move with it, not with the page.
+    drag.startY -= window.scrollY - was;
+    dragTo(drag.lastY);
+    dragSwap();
+  }
+  requestAnimationFrame(dragScroll);
+}
+function onDragMove(e){
+  if (!drag || e.pointerId !== drag.id) return;
+  drag.lastY = e.clientY;
+  if (!drag.moved && Math.abs(e.clientY - drag.startY) > 2) drag.moved = true;
+  dragTo(e.clientY);
+  dragSwap();
+}
+function endDrag(e){
+  if (!drag || (e && e.pointerId !== drag.id)) return;
+  const d = drag;
+  drag = null;
+  d.block.classList.remove('dragging');
+  d.block.style.transform = '';
+  document.body.classList.remove('dragging');
+  if (!d.moved) return;      // a tap on the grip is not a reorder
+  commitOrder();
+}
+// The DOM is the new order — of the habits on screen. Under a filter the hidden ones
+// keep the slots they already held, so a reorder made on a filtered board never
+// rearranges habits the user could not see.
+function commitOrder(){
+  if (!CURRENT) return;
+  const shown = habitBlocks().map(function(el){ return Number(el.dataset.id); });
+  const all = CURRENT.habits.slice();
+  const slots = [];
+  for (let i = 0; i < all.length; i++) { if (shown.indexOf(all[i].id) >= 0) slots.push(i); }
+  const byId = {};
+  for (const x of all) byId[x.id] = x;
+  slots.forEach(function(pos, k){ all[pos] = byId[shown[k]]; });
+  const same = all.every(function(x, i){ return x.id === CURRENT.habits[i].id; });
+  if (same) return;
+  CURRENT.habits = all;
+  render(CURRENT);
+  apiWrite('/api/habits', { op:'reorder', ids: all.map(function(x){ return x.id; }) }).then(function(r){
+    if (!r || !r.queued) load();
+  });
+}
+
 function showLegend(){
   const body = document.getElementById('legend-body');
   const parts = [];
@@ -1388,6 +1499,7 @@ function render(st) {
 
     const block = document.createElement('div');
     block.className = 'habit' + (h.frozen ? ' frozen' : '');
+    block.dataset.id = h.id;   // how a dropped card is mapped back to its habit
     block.style.setProperty('--c', color);
 
     const head = document.createElement('div'); head.className = 'hhead';
@@ -1416,17 +1528,24 @@ function render(st) {
     // clean, and in any other order moving a habit would rearrange a list nobody is
     // looking at.
     if (VIEW.open && VIEW.sort === 'custom' && list.length > 1) {
-      const mv = document.createElement('div'); mv.className = 'hmove';
-      [[-1, '▲', 'moveUp', hi === 0], [1, '▼', 'moveDown', hi === list.length - 1]].forEach(function(spec){
-        const b2 = document.createElement('button');
-        b2.type = 'button';
-        b2.textContent = spec[1];
-        b2.title = t(spec[2]);
-        b2.disabled = spec[3];
-        b2.addEventListener('click', function(){ moveHabit(h, spec[0]); });
-        mv.appendChild(b2);
+      const grip = document.createElement('button');
+      grip.type = 'button';
+      grip.className = 'hgrip';
+      grip.title = t('dragHint');
+      grip.setAttribute('aria-label', t('dragHint'));
+      // Drawn rather than typed: ☰ and ⠿ are both missing from enough phone fonts to
+      // turn the one control that has no text label into an empty box.
+      grip.innerHTML = '<svg width="15" height="11" viewBox="0 0 15 11" aria-hidden="true">' +
+        '<rect width="15" height="1.8" rx=".9"></rect><rect y="4.6" width="15" height="1.8" rx=".9"></rect>' +
+        '<rect y="9.2" width="15" height="1.8" rx=".9"></rect></svg>';
+      grip.addEventListener('pointerdown', function(e){ startDrag(e, block, h); });
+      // Dragging is not the only way in: the same reorder from the keyboard.
+      grip.addEventListener('keydown', function(e){
+        if (e.key !== 'ArrowUp' && e.key !== 'ArrowDown') return;
+        e.preventDefault();
+        moveHabit(h, e.key === 'ArrowUp' ? -1 : 1);
       });
-      btns.appendChild(mv);
+      btns.appendChild(grip);
     }
     btns.appendChild(info); btns.appendChild(menu);
     head.appendChild(em); head.appendChild(txt);
@@ -1479,7 +1598,17 @@ function render(st) {
     block.appendChild(cells);
     frag.appendChild(block);
   }
+  // A reorder rebuilds the board twice (optimistically, then from the server), and a
+  // keyboard user would lose the grip they were holding both times.
+  const focused = document.activeElement;
+  const keep = focused && focused.classList && focused.classList.contains('hgrip')
+    ? focused.closest('.habit') : null;
+  const keepId = keep ? keep.dataset.id : null;
   document.getElementById('rows').replaceChildren(frag);
+  if (keepId) {
+    const again = document.querySelector('.habit[data-id="' + keepId + '"] .hgrip');
+    if (again) again.focus();
+  }
 
   // Nothing due today reads as a finished day, not an empty one.
   const pct = due ? done/due : 1;
@@ -1552,6 +1681,9 @@ async function load() {
     err(String(e && e.message || e));
     return;
   }
+  // A background refresh landing mid-drag would replace the card under the finger.
+  // Nothing is lost by skipping it: the drop runs a load() of its own.
+  if (drag) return;
   const j = JSON.stringify(st);
   if (j === lastStateJson) return;   // unchanged — leave the DOM alone
   lastStateJson = j;
@@ -1757,6 +1889,12 @@ document.addEventListener('click', function(e){
   const m = document.getElementById('hmenu');
   if (m.classList.contains('open') && !m.contains(e.target)) closeMenu();
 });
+
+// drag to reorder. The grip captures the pointer, so the move/up events arrive here
+// even when the finger leaves the card entirely.
+document.addEventListener('pointermove', onDragMove);
+document.addEventListener('pointerup', endDrag);
+document.addEventListener('pointercancel', endDrag);
 
 // sort / filter toolbar
 document.getElementById('tbar').addEventListener('click', toggleTools);
