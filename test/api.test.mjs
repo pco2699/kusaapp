@@ -374,3 +374,52 @@ describe('freeze', () => {
     assert.equal(r.status, 404);
   });
 });
+
+describe('habit order', () => {
+  const names = async () => (await state()).habits.map(h => h.name);
+  const ids = async () => (await state()).habits.map(h => h.id);
+
+  test('habits come back in the order they were added', async () => {
+    for (const n of ['A', 'B', 'C']) await create({ name: n });
+    assert.deepEqual(await names(), ['A', 'B', 'C']);
+  });
+
+  test('a reorder rearranges the board and sticks', async () => {
+    for (const n of ['A', 'B', 'C']) await create({ name: n });
+    const [a, b, c] = await ids();
+    const r = await s.post('/api/habits', { op: 'reorder', ids: [c, a, b] });
+    assert.equal(r.status, 200);
+    assert.deepEqual(await names(), ['C', 'A', 'B']);
+    // and again, from the new order rather than the original one
+    await s.post('/api/habits', { op: 'reorder', ids: [a, b, c] });
+    assert.deepEqual(await names(), ['A', 'B', 'C']);
+  });
+
+  test('a new habit lands after the ones already arranged', async () => {
+    for (const n of ['A', 'B']) await create({ name: n });
+    const [a, b] = await ids();
+    await s.post('/api/habits', { op: 'reorder', ids: [b, a] });
+    await create({ name: 'C' });
+    assert.deepEqual(await names(), ['B', 'A', 'C'], 'the fresh habit is last, not first');
+  });
+
+  test('a reorder with no usable ids is a 400 and changes nothing', async () => {
+    for (const n of ['A', 'B']) await create({ name: n });
+    for (const bad of [undefined, 'nope', [], ['x', null]]) {
+      const r = await s.post('/api/habits', { op: 'reorder', ids: bad });
+      assert.equal(r.status, 400, JSON.stringify(bad));
+    }
+    assert.deepEqual(await names(), ['A', 'B']);
+  });
+
+  test('a reorder listing only some habits leaves the rest behind it', async () => {
+    for (const n of ['A', 'B', 'C']) await create({ name: n });
+    const [a, b, c] = await ids();
+    // C and B claim the first two slots; A keeps the sort it was created with (0) and,
+    // tied with C, falls back to id order — so a partial list never loses a habit.
+    await s.post('/api/habits', { op: 'reorder', ids: [c, b] });
+    const after = await names();
+    assert.equal(after.length, 3, 'every habit is still on the board');
+    assert.deepEqual([...after].sort(), ['A', 'B', 'C']);
+  });
+});

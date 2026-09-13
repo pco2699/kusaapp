@@ -56,8 +56,11 @@ Auth: `?key=<token>` or `Authorization: Bearer <token>`.
 | `POST /api/toggle` `{ habit_id, date? }` | check in / undo; `date` defaults to today (`YYYY-MM-DD`) |
 | `POST /api/skip` `{ habit_id, date? }` | mark skipped / unskip |
 | `POST /api/freeze` | `{ habit_id, reason, resume_on }` pauses (both required, `resume_on` = `YYYY-MM-DD`, not past), or `{ op:"unfreeze", habit_id }` resumes |
-| `POST /api/habits` | `{ op:"create", name, emoji?, any_days?, all_days? }` → `{ id }`, or `{ op:"delete", id }` |
+| `POST /api/habits` | `{ op:"create", name, emoji?, any_days?, all_days? }` → `{ id }`, `{ op:"delete", id }`, or `{ op:"reorder", ids:[…] }` (the habits in the order they should appear) |
 | `GET /api/health` | `{ ok: true }` |
+
+Habits come back in the user's own order (what they arranged in the app), so keep that
+order when you list them back rather than sorting by id or by score.
 
 `days` = check-in dates, `skips` = skipped dates, `total` counts check-ins only.
 `score` = habit strength 0–100 today, `score_history` = one score per calendar day ending on `today`

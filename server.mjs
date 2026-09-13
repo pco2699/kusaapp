@@ -260,7 +260,15 @@ const Q_CHECKIN_DEL = db.prepare('DELETE FROM checkins WHERE habit_id=? AND date
 const Q_CHECKIN_ADD = db.prepare('INSERT INTO checkins (habit_id, date) VALUES (?, ?)');
 const Q_SKIP_ADD = db.prepare('INSERT INTO checkins (habit_id, date, skip) VALUES (?, ?, 1)');
 const Q_HABIT_ARCHIVE = db.prepare('UPDATE habits SET archived=1 WHERE id=?');
-const Q_HABIT_ADD = db.prepare('INSERT INTO habits (name, emoji, any_days, all_days) VALUES (?, ?, ?, ?)');
+// A new habit takes the next free slot rather than the default 0, which on a board that
+// has been rearranged would drop it into the middle of the list.
+const Q_HABIT_ADD = db.prepare(
+  'INSERT INTO habits (name, emoji, any_days, all_days, sort) ' +
+  'VALUES (?, ?, ?, ?, (SELECT COALESCE(MAX(sort), -1) + 1 FROM habits))'
+);
+// The `sort` column has been in the schema (and in Q_HABITS' ORDER BY) from the start;
+// this is what finally writes to it.
+const Q_HABIT_SORT = db.prepare('UPDATE habits SET sort=? WHERE id=? AND archived=0');
 const Q_FREEZES = db.prepare('SELECT habit_id, start_date, end_date, reason, resume_on FROM freezes ORDER BY start_date');
 const Q_FREEZE_OPEN = db.prepare('SELECT id, start_date, reason, resume_on FROM freezes WHERE habit_id=? AND end_date IS NULL ORDER BY id DESC');
 const Q_FREEZE_ADD = db.prepare('INSERT INTO freezes (habit_id, start_date, reason, resume_on) VALUES (?, ?, ?, ?)');
@@ -628,6 +636,41 @@ const HTML_SHELL = `<!doctype html>
 
   .board { background:var(--card); border-radius:22px; box-shadow:0 1px 2px rgba(20,30,60,.05), 0 10px 28px rgba(20,30,60,.06); overflow:hidden; }
 
+  /* Sort + filter, folded away above the dates. Collapsed it is a 30px strip with a
+     chevron: the board is what the app is for, and these are settings you touch twice a
+     month. What it can't do is hide silently — a filter that is on shows its icon in the
+     strip, so a short board is never a mystery. */
+  .toolbar { border-bottom:1px solid var(--line); }
+  .tbar { display:flex; align-items:center; gap:8px; padding:7px 14px; cursor:pointer; user-select:none; }
+  .tbar .cur { display:flex; gap:8px; font-size:13px; line-height:1; color:var(--sub); }
+  .toolbar.open .tbar .cur { display:none; }
+  .tbar .chev { margin-left:auto; font-size:11px; color:var(--sub); transition:transform .15s; }
+  .toolbar.open .tbar .chev { transform:rotate(180deg); }
+  .tbody { display:none; align-items:center; gap:10px; flex-wrap:wrap; padding:2px 14px 12px; }
+  .toolbar.open .tbody { display:flex; }
+  .seg { display:flex; gap:3px; background:var(--soft); border-radius:13px; padding:3px; }
+  .seg button { border:none; background:none; color:var(--sub); font-size:15px; line-height:1;
+                padding:8px 12px; border-radius:10px; cursor:pointer; }
+  .seg button.on { background:var(--btn); color:var(--btn-tx); }
+  .tbody .hbtn { margin-left:auto; }
+  /* The legend is the fallback for every icon above, so it is a plain two-column list. */
+  .legend { display:grid; grid-template-columns:auto 1fr; gap:10px 12px; align-items:start; font-size:13.5px; }
+  .legend .ic { font-size:16px; line-height:1.4; text-align:center; min-width:22px; }
+  .legend .lb { color:var(--sub); line-height:1.5; }
+  .legend .hd { grid-column:1 / -1; font-size:11.5px; font-weight:700; color:var(--sub); letter-spacing:.04em; margin-top:4px; }
+  .legend .hd:first-child { margin-top:0; }
+  /* Only in manual order: the three-bar grip every list uses for "drag me". touch-action
+     is what lets a drag off the handle move the card instead of scrolling the page. */
+  .hgrip { flex:none; width:30px; height:34px; border:none; border-radius:9px; background:var(--soft); color:var(--sub);
+           display:flex; align-items:center; justify-content:center; padding:0; cursor:grab; touch-action:none; }
+  .hgrip:active { cursor:grabbing; }
+  .hgrip svg { display:block; fill:currentColor; }
+  .habit.dragging { position:relative; z-index:20; background:var(--card); border-radius:16px;
+                    box-shadow:0 12px 30px rgba(20,30,60,.22); content-visibility:visible; }
+  .habit.dragging .hgrip { cursor:grabbing; background:var(--btn); color:var(--btn-tx); }
+  /* The card under the finger must not be picked up as text along the way. */
+  body.dragging, body.dragging * { user-select:none; }
+
   .dates { display:grid; grid-template-columns:repeat(var(--n,7), minmax(0,64px)); justify-content:center; gap:6px; padding:14px 14px 10px; border-bottom:1px solid var(--line); }
   .dates.dense .dow { display:none; }
   .dates.dense .dcol { gap:2px; }
@@ -803,6 +846,24 @@ const HTML_SHELL = `<!doctype html>
 
 <div id="err"></div>
 <div class="board">
+  <div class="toolbar" id="toolbar">
+    <div class="tbar" id="tbar" role="button" tabindex="0" aria-expanded="false" aria-controls="tbody">
+      <span class="cur" id="tcur"></span>
+      <span class="chev">▼</span>
+    </div>
+    <div class="tbody" id="tbody">
+      <div class="seg" id="sortseg">
+        <button type="button" data-s="custom">⇅</button>
+        <button type="button" data-s="score">💪</button>
+        <button type="button" data-s="created">🕒</button>
+      </div>
+      <div class="seg" id="filterseg">
+        <button type="button" data-f="today">🎯</button>
+        <button type="button" data-f="all">📋</button>
+      </div>
+      <button type="button" class="hbtn info" id="legend-btn">ⓘ</button>
+    </div>
+  </div>
   <div class="dates" id="dates"></div>
   <div id="rows"></div>
 </div>
@@ -860,6 +921,12 @@ const HTML_SHELL = `<!doctype html>
       <span id="stats-total-label"></span>
     </div>
   </div>
+  <menu><button class="ghost" value="ok">OK</button></menu>
+</form></dialog>
+
+<dialog id="legenddlg"><form method="dialog">
+  <h3 id="legend-title"></h3>
+  <div class="legend" id="legend-body"></div>
   <menu><button class="ghost" value="ok">OK</button></menu>
 </form></dialog>
 
@@ -921,7 +988,7 @@ const I18N = {
     strength:'習慣の強さ', strengthCap:'直近30日の推移',
     daySep:'・', anySuffix:'のどれか1回', allSuffix:' すべて',
     updateReady:'新しいバージョンがあります', updateNow:'更新', updateLater:'あとで', updating:'更新中…',
-    freeze:'中断する', unfreeze:'再開する', freezeTitle:'習慣を中断',
+    freeze:'中断', unfreeze:'再開', freezeTitle:'習慣を中断',
     freezeNote:'中断した期間は記録に残り、習慣の強さは下がりません。いつでも再開できます。',
     freezeReason:'中断する理由', freezeReasonPh:'例: 出張のため',
     freezeUntil:'再開予定日', freezeHint:'その日になったらリマインドします',
@@ -930,7 +997,12 @@ const I18N = {
     frozenTag:'⏸ 中断中', frozenUntil:'再開予定 ', frozenReason:'理由: ',
     remindTitle:'⏸ 再開の予定日です', remindBody1:'「', remindBody2:'」の再開予定日（',
     remindBody3:'）になりました。再開しますか？', remindReason:'中断理由: ',
-    remindResume:'再開する', remindLater:'あとで'
+    remindResume:'再開', remindLater:'あとで',
+    viewTools:'並べ替えと絞り込み', legendTitle:'アイコンの説明',
+    sortHead:'並べ替え', filterHead:'表示',
+    sortCustom:'自分で並べた順（このパネルを開くと ☰ をドラッグして入れ替え）', sortScore:'習慣の強さが高い順', sortCreated:'追加した順',
+    filterToday:'今日やるべき習慣だけ', filterAll:'すべての習慣',
+    dragHint:'ドラッグで並べ替え（↑↓キーでも移動できます）', emptyToday:'🎯 今日やるべき習慣はありません'
   },
   en: {
     themeToggle:'Toggle theme', addHabit:'＋ New habit', newHabit:'New habit', habitName:'Habit name',
@@ -951,7 +1023,12 @@ const I18N = {
     frozenTag:'⏸ Paused', frozenUntil:'resumes ', frozenReason:'reason: ',
     remindTitle:'⏸ Time to resume', remindBody1:'"', remindBody2:'" was paused until ',
     remindBody3:'. Resume it now?', remindReason:'Paused because: ',
-    remindResume:'Resume', remindLater:'Later'
+    remindResume:'Resume', remindLater:'Later',
+    viewTools:'Sort and filter', legendTitle:'What the icons mean',
+    sortHead:'Sort', filterHead:'Show',
+    sortCustom:'Your own order (drag the ☰ grip while this panel is open)', sortScore:'Strongest habits first', sortCreated:'The order you added them',
+    filterToday:"Only what's due today", filterAll:'Every habit',
+    dragHint:'Drag to reorder (or use the arrow keys)', emptyToday:'🎯 Nothing is due today'
   }
 };
 function t(k){ var d = I18N[LANG] || I18N.en; return (d && d[k] !== undefined) ? d[k] : k; }
@@ -984,6 +1061,13 @@ function applyI18n(){
   document.getElementById('remind-title').textContent = t('remindTitle');
   document.getElementById('remind-later').textContent = t('remindLater');
   document.getElementById('remind-resume').textContent = t('remindResume');
+  document.getElementById('tbar').title = t('viewTools');
+  document.getElementById('legend-btn').title = t('legendTitle');
+  document.getElementById('legend-title').textContent = t('legendTitle');
+  ICONS.forEach(function(i){
+    const b = document.querySelector('[data-' + (i.kind === 'sort' ? 's' : 'f') + '="' + i.key + '"]');
+    if (b) b.title = t(i.i18n);
+  });
 }
 
 const PALETTE = ['#ff6b6b','#f59e0b','#10b981','#3b82f6','#8b5cf6','#ec4899','#14b8a6','#f97316','#6366f1','#84cc16'];
@@ -1117,6 +1201,211 @@ function buildDates(days, todayStr){
   el.innerHTML = parts.join('');
 }
 
+// ---------- sort + filter ----------
+// One table drives the toolbar buttons, their tooltips and the legend, so an icon can
+// never mean one thing in the strip and another in the popup.
+const ICONS = [
+  { kind:'sort', key:'custom', icon:'⇅', i18n:'sortCustom' },
+  { kind:'sort', key:'score', icon:'💪', i18n:'sortScore' },
+  { kind:'sort', key:'created', icon:'🕒', i18n:'sortCreated' },
+  { kind:'filter', key:'today', icon:'🎯', i18n:'filterToday' },
+  { kind:'filter', key:'all', icon:'📋', i18n:'filterAll' }
+];
+function iconFor(kind, key){
+  for (const i of ICONS) { if (i.kind === kind && i.key === key) return i; }
+  return null;
+}
+// The defaults are "as the board has always looked": the server's own order, everything
+// visible. They are a per-device view preference, so they live in localStorage.
+const VIEW_KEY = 'view';
+const VIEW = { sort:'custom', filter:'all', open:false };
+(function(){
+  try {
+    const v = JSON.parse(localStorage.getItem(VIEW_KEY) || '{}');
+    if (iconFor('sort', v.sort)) VIEW.sort = v.sort;
+    if (iconFor('filter', v.filter)) VIEW.filter = v.filter;
+  } catch (e) {}
+})();
+// The sort and the filter are remembered; whether the panel is open is not. It opens
+// when you want to change something and is folded away again on the next visit, which
+// is the point of putting it behind an accordion at all.
+function saveView(){ try { localStorage.setItem(VIEW_KEY, JSON.stringify({ sort: VIEW.sort, filter: VIEW.filter })); } catch (e) {} }
+
+// What the board shows, out of everything the server sent. The habits arrive in the
+// user's own order (the sort column), so that is what 'custom' leaves alone.
+function viewList(habits){
+  const out = VIEW.filter === 'today' ? habits.filter(function(h){ return h.due_now; }) : habits.slice();
+  if (VIEW.sort === 'score') out.sort(function(a, b){ return (b.score || 0) - (a.score || 0) || a.id - b.id; });
+  else if (VIEW.sort === 'created') out.sort(function(a, b){ return a.id - b.id; });
+  return out;
+}
+
+// Paints the toolbar from VIEW: which buttons read as selected, whether the accordion is
+// open, and what the collapsed strip admits to. Called from render(), so the very first
+// paint already matches the stored preference.
+function applyView(){
+  document.querySelectorAll('#sortseg button').forEach(function(b){ b.classList.toggle('on', b.dataset.s === VIEW.sort); });
+  document.querySelectorAll('#filterseg button').forEach(function(b){ b.classList.toggle('on', b.dataset.f === VIEW.filter); });
+  const bar = document.getElementById('toolbar');
+  bar.classList.toggle('open', VIEW.open);
+  document.getElementById('tbar').setAttribute('aria-expanded', VIEW.open ? 'true' : 'false');
+  // Collapsed, the strip shows only what is *not* the default — an empty strip therefore
+  // means the board is showing everything, in its own order.
+  const cur = [];
+  if (VIEW.sort !== 'custom') cur.push(iconFor('sort', VIEW.sort));
+  if (VIEW.filter !== 'all') cur.push(iconFor('filter', VIEW.filter));
+  document.getElementById('tcur').innerHTML =
+    cur.map(function(i){ return '<span title="' + esc(t(i.i18n)) + '">' + i.icon + '</span>'; }).join('');
+}
+function setView(kind, key){
+  if (!iconFor(kind, key) || VIEW[kind] === key) return;
+  VIEW[kind] = key;
+  saveView();
+  if (CURRENT) render(CURRENT);
+}
+function toggleTools(){
+  VIEW.open = !VIEW.open;
+  // The reorder controls live and die with the panel, so the cards are rebuilt.
+  if (CURRENT) render(CURRENT); else applyView();
+}
+// Moving a habit swaps it with its neighbour *on screen*, which under a filter can be a
+// habit several rows apart in the full order — that is still what "put this one above
+// that one" means. The whole order goes back to the server in one call.
+function moveHabit(h, dir){
+  if (!CURRENT) return;
+  const view = viewList(CURRENT.habits);
+  const vi = view.findIndex(function(x){ return x.id === h.id; });
+  const other = view[vi + dir];
+  if (vi < 0 || !other) return;
+  const all = CURRENT.habits.slice();
+  const a = all.findIndex(function(x){ return x.id === h.id; });
+  const b = all.findIndex(function(x){ return x.id === other.id; });
+  all[a] = other; all[b] = h;
+  CURRENT.habits = all;
+  render(CURRENT);   // the board moves under the tap, not after the round trip
+  apiWrite('/api/habits', { op:'reorder', ids: all.map(function(x){ return x.id; }) }).then(function(r){
+    if (!r || !r.queued) load();
+  });
+}
+// ---------- drag to reorder ----------
+// Pointer events rather than HTML5 drag-and-drop, which never fires on touch — and this
+// is a phone-first board. The card follows the finger by transform, and whenever its
+// middle passes a neighbour's middle the two swap in the DOM there and then, so what you
+// see during the drag is already the order you are going to get.
+let drag = null;
+function habitBlocks(){
+  return Array.prototype.filter.call(document.getElementById('rows').children,
+    function(el){ return el.classList && el.classList.contains('habit'); });
+}
+function startDrag(e, block, h){
+  if (drag || (e.button !== undefined && e.button > 0)) return;
+  e.preventDefault();
+  drag = { block: block, h: h, startY: e.clientY, tx: 0, lastY: e.clientY, moved: false, id: e.pointerId };
+  block.classList.add('dragging');
+  document.body.classList.add('dragging');
+  try { e.currentTarget.setPointerCapture(e.pointerId); } catch (e2) {}
+  requestAnimationFrame(dragScroll);
+}
+function dragTo(y){
+  drag.tx = y - drag.startY;
+  drag.block.style.transform = 'translateY(' + drag.tx + 'px)';
+}
+// Moving the card in the DOM changes where its layout puts it, so the translation is
+// rebased by exactly that jump — otherwise the card would leap out from under the finger
+// on every swap.
+function reseat(move){
+  const before = drag.block.getBoundingClientRect().top - drag.tx;
+  move();
+  const after = drag.block.getBoundingClientRect().top - drag.tx;
+  drag.startY += after - before;
+  dragTo(drag.lastY);
+}
+function dragSwap(){
+  const rows = document.getElementById('rows');
+  const r = drag.block.getBoundingClientRect();
+  const mid = r.top + r.height / 2;
+  const blocks = habitBlocks();
+  const i = blocks.indexOf(drag.block);
+  const prev = blocks[i - 1], next = blocks[i + 1];
+  if (prev) {
+    const pr = prev.getBoundingClientRect();
+    if (mid < pr.top + pr.height / 2) return reseat(function(){ rows.insertBefore(drag.block, prev); });
+  }
+  if (next) {
+    const nr = next.getBoundingClientRect();
+    if (mid > nr.top + nr.height / 2) return reseat(function(){ rows.insertBefore(drag.block, next.nextSibling); });
+  }
+}
+// A finger parked near the top or bottom edge keeps the page moving, so a habit can be
+// dragged past the end of the screen on a long board.
+function dragScroll(){
+  if (!drag) return;
+  const h = window.innerHeight;
+  const y = drag.lastY;
+  let d = 0;
+  if (y < 80) d = -Math.min(16, (80 - y) / 4);
+  else if (y > h - 80) d = Math.min(16, (y - (h - 80)) / 4);
+  if (d) {
+    const was = window.scrollY;
+    window.scrollBy(0, d);
+    // The page moved under the pointer; the card has to move with it, not with the page.
+    drag.startY -= window.scrollY - was;
+    dragTo(drag.lastY);
+    dragSwap();
+  }
+  requestAnimationFrame(dragScroll);
+}
+function onDragMove(e){
+  if (!drag || e.pointerId !== drag.id) return;
+  drag.lastY = e.clientY;
+  if (!drag.moved && Math.abs(e.clientY - drag.startY) > 2) drag.moved = true;
+  dragTo(e.clientY);
+  dragSwap();
+}
+function endDrag(e){
+  if (!drag || (e && e.pointerId !== drag.id)) return;
+  const d = drag;
+  drag = null;
+  d.block.classList.remove('dragging');
+  d.block.style.transform = '';
+  document.body.classList.remove('dragging');
+  if (!d.moved) return;      // a tap on the grip is not a reorder
+  commitOrder();
+}
+// The DOM is the new order — of the habits on screen. Under a filter the hidden ones
+// keep the slots they already held, so a reorder made on a filtered board never
+// rearranges habits the user could not see.
+function commitOrder(){
+  if (!CURRENT) return;
+  const shown = habitBlocks().map(function(el){ return Number(el.dataset.id); });
+  const all = CURRENT.habits.slice();
+  const slots = [];
+  for (let i = 0; i < all.length; i++) { if (shown.indexOf(all[i].id) >= 0) slots.push(i); }
+  const byId = {};
+  for (const x of all) byId[x.id] = x;
+  slots.forEach(function(pos, k){ all[pos] = byId[shown[k]]; });
+  const same = all.every(function(x, i){ return x.id === CURRENT.habits[i].id; });
+  if (same) return;
+  CURRENT.habits = all;
+  render(CURRENT);
+  apiWrite('/api/habits', { op:'reorder', ids: all.map(function(x){ return x.id; }) }).then(function(r){
+    if (!r || !r.queued) load();
+  });
+}
+
+function showLegend(){
+  const body = document.getElementById('legend-body');
+  const parts = [];
+  ['sort', 'filter'].forEach(function(kind){
+    parts.push('<div class="hd">' + esc(t(kind === 'sort' ? 'sortHead' : 'filterHead')) + '</div>');
+    ICONS.filter(function(i){ return i.kind === kind; }).forEach(function(i){
+      parts.push('<div class="ic">' + i.icon + '</div><div class="lb">' + esc(t(i.i18n)) + '</div>');
+    });
+  });
+  body.innerHTML = parts.join('');
+  document.getElementById('legenddlg').showModal();
+}
+
 // ---------- freeze ----------
 // The server ships freeze *periods* (end is exclusive, null while the pause is open);
 // the board turns them back into a per-day predicate.
@@ -1185,24 +1474,32 @@ function render(st) {
   // The ring counts the day's actual targets: the habits whose today cell is lit, i.e.
   // the ones scheduled for today (due_now, the same rule that leaves a cell 'off'
   // below). A habit that isn't scheduled today is nothing to do, so it belongs in
-  // neither half of the fraction rather than padding both.
+  // neither half of the fraction rather than padding both. It counts every habit, not
+  // the filtered view: hiding a habit from the board doesn't excuse you from it.
   let done = 0, due = 0;
-  if (!st.habits.length) {
+  for (const h of st.habits) { if (h.due_now) { due++; if (h.done_now) done++; } }
+  // What the toolbar asked for; the move buttons step through this same list.
+  const list = viewList(st.habits);
+  applyView();
+  if (!list.length) {
     const e = document.createElement('div'); e.className = 'empty';
-    e.textContent = t('empty');
+    // Nothing to show can mean two different things, and "add your first habit" is the
+    // wrong answer to a filter that happens to match nothing.
+    e.textContent = st.habits.length ? t('emptyToday') : t('empty');
     frag.appendChild(e);
   }
-  for (const h of st.habits) {
+  for (let hi = 0; hi < list.length; hi++) {
+    const h = list[hi];
     const color = PALETTE[h.id % PALETTE.length];
     const set = new Set(h.days);
     const skipSet = new Set(h.skips || []);
     const allowed = h.any_days ? new Set(h.any_days) : (h.all_days ? new Set(h.all_days) : null);
-    if (h.due_now) { due++; if (h.done_now) done++; }
 
     const frozenOn = freezeFn(h.freezes);
 
     const block = document.createElement('div');
     block.className = 'habit' + (h.frozen ? ' frozen' : '');
+    block.dataset.id = h.id;   // how a dropped card is mapped back to its habit
     block.style.setProperty('--c', color);
 
     const head = document.createElement('div'); head.className = 'hhead';
@@ -1227,6 +1524,29 @@ function render(st) {
       openMenu(h, r.right - 150, r.bottom + 6);
     });
     const btns = document.createElement('div'); btns.className = 'hbtns';
+    // Only while the panel is open, and only in manual order: the default board stays
+    // clean, and in any other order moving a habit would rearrange a list nobody is
+    // looking at.
+    if (VIEW.open && VIEW.sort === 'custom' && list.length > 1) {
+      const grip = document.createElement('button');
+      grip.type = 'button';
+      grip.className = 'hgrip';
+      grip.title = t('dragHint');
+      grip.setAttribute('aria-label', t('dragHint'));
+      // Drawn rather than typed: ☰ and ⠿ are both missing from enough phone fonts to
+      // turn the one control that has no text label into an empty box.
+      grip.innerHTML = '<svg width="15" height="11" viewBox="0 0 15 11" aria-hidden="true">' +
+        '<rect width="15" height="1.8" rx=".9"></rect><rect y="4.6" width="15" height="1.8" rx=".9"></rect>' +
+        '<rect y="9.2" width="15" height="1.8" rx=".9"></rect></svg>';
+      grip.addEventListener('pointerdown', function(e){ startDrag(e, block, h); });
+      // Dragging is not the only way in: the same reorder from the keyboard.
+      grip.addEventListener('keydown', function(e){
+        if (e.key !== 'ArrowUp' && e.key !== 'ArrowDown') return;
+        e.preventDefault();
+        moveHabit(h, e.key === 'ArrowUp' ? -1 : 1);
+      });
+      btns.appendChild(grip);
+    }
     btns.appendChild(info); btns.appendChild(menu);
     head.appendChild(em); head.appendChild(txt);
     // A habit tracked before this field existed (a cached offline state, an old client)
@@ -1278,7 +1598,17 @@ function render(st) {
     block.appendChild(cells);
     frag.appendChild(block);
   }
+  // A reorder rebuilds the board twice (optimistically, then from the server), and a
+  // keyboard user would lose the grip they were holding both times.
+  const focused = document.activeElement;
+  const keep = focused && focused.classList && focused.classList.contains('hgrip')
+    ? focused.closest('.habit') : null;
+  const keepId = keep ? keep.dataset.id : null;
   document.getElementById('rows').replaceChildren(frag);
+  if (keepId) {
+    const again = document.querySelector('.habit[data-id="' + keepId + '"] .hgrip');
+    if (again) again.focus();
+  }
 
   // Nothing due today reads as a finished day, not an empty one.
   const pct = due ? done/due : 1;
@@ -1351,6 +1681,9 @@ async function load() {
     err(String(e && e.message || e));
     return;
   }
+  // A background refresh landing mid-drag would replace the card under the finger.
+  // Nothing is lost by skipping it: the drop runs a load() of its own.
+  if (drag) return;
   const j = JSON.stringify(st);
   if (j === lastStateJson) return;   // unchanged — leave the DOM alone
   lastStateJson = j;
@@ -1556,6 +1889,27 @@ document.addEventListener('click', function(e){
   const m = document.getElementById('hmenu');
   if (m.classList.contains('open') && !m.contains(e.target)) closeMenu();
 });
+
+// drag to reorder. The grip captures the pointer, so the move/up events arrive here
+// even when the finger leaves the card entirely.
+document.addEventListener('pointermove', onDragMove);
+document.addEventListener('pointerup', endDrag);
+document.addEventListener('pointercancel', endDrag);
+
+// sort / filter toolbar
+document.getElementById('tbar').addEventListener('click', toggleTools);
+document.getElementById('tbar').addEventListener('keydown', e => {
+  if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); toggleTools(); }
+});
+document.getElementById('sortseg').addEventListener('click', e => {
+  const b = e.target.closest('button');
+  if (b) setView('sort', b.dataset.s);
+});
+document.getElementById('filterseg').addEventListener('click', e => {
+  const b = e.target.closest('button');
+  if (b) setView('filter', b.dataset.f);
+});
+document.getElementById('legend-btn').addEventListener('click', showLegend);
 
 // add dialog: mode + weekday chips
 document.querySelectorAll('#modes label').forEach(lab => {
@@ -1870,6 +2224,17 @@ const server = createServer(async (req, res) => {
 
   if (req.method === 'POST' && p === '/api/habits') {
     const b = await body(req);
+    // The client sends the habits in the order it wants them in, so one call settles the
+    // whole board and a half-applied reorder can't leave two habits claiming one slot.
+    if (b.op === 'reorder') {
+      if (!Array.isArray(b.ids)) return json(res, 400, { error: 'ids required' });
+      const ids = b.ids.map(habitId).filter(Boolean);
+      if (!ids.length) return json(res, 400, { error: 'ids required' });
+      let i = 0;
+      for (const id of ids) Q_HABIT_SORT.run(i++, id);
+      invalidateState();
+      return json(res, 200, { ok: true });
+    }
     if (b.op === 'delete' && b.id) {
       const id = habitId(b.id);
       if (!id) return json(res, 404, { error: 'habit not found' });
