@@ -34,6 +34,8 @@ export function dowOf(dateStr) { return new Date(dateStr + 'T12:00:00').getDay()
 
 // Is this habit scheduled for the given weekday (0=Sun .. 6=Sat)?
 export function dueToday(h, dow) {
+  // A frozen habit is paused: nothing to do, and the server refuses check-ins for it.
+  if (h.frozen) return false;
   if (h.any_days) return h.any_days.includes(dow);
   if (h.all_days) return h.all_days.includes(dow);
   return true; // daily

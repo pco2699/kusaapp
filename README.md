@@ -9,6 +9,7 @@ A minimal habit tracker that runs as a **single Node.js file** (zero npm depende
 - 📱 **Mobile-first UI** — card layout with big tappable cells
 - 🎨 **Strength heatmap** — a filled cell is shaded by the habit's strength *on that day*, one step per 10% (under 10% = 38% color → 90%+ = full color), so the board darkens as the habit takes hold and stays dark through the day after a miss
 - ✂️ **Skip** — long-press (mobile) / right-click (desktop) to skip a day with a diagonal slash; a skipped day leaves the strength exactly where it was
+- ⏸ **Freeze (中断)** — life gets in the way, so a habit can be *paused* from the ⋮ menu instead of deleted. Pausing asks for a reason and a planned resume date (both required); the paused days are hatched on the board, cost no strength and drop out of the day's ring. When the resume date arrives the app pops up a reminder — resume now, or "later" and it asks again tomorrow — and a paused habit can be resumed from the ⋮ menu at any time
 - 📆 **Any-of-weekday habits** — e.g. "run on any weekday", "gym on either weekend day". Non-target days are shown faded and rejected by the API. The target is one check-in per *period* (one period per maximal run of allowed weekdays), not per calendar day.
 - 🗓 **All-of-weekday habits** — e.g. "weekdays only": every selected day counts, non-selected days are auto-skipped and cost nothing.
 - 💪 **Habit strength, not streaks** — one *non-binary* number per habit, ported from
@@ -91,6 +92,14 @@ names, so nothing touches your `habits.db`.
     180 days — that is what shades the board and draws the trend line.
 - `POST /api/toggle` — `{ habit_id, date? }` toggle a check-in
 - `POST /api/skip` — `{ habit_id, date? }` toggle a skip (the score carries across it)
+- `POST /api/freeze` — `{ habit_id, reason, resume_on }` pauses a habit, or `{ op: "unfreeze", habit_id }` resumes it
+  - `reason` (non-empty) and `resume_on` (`YYYY-MM-DD`, not in the past) are both required
+  - freezing an already-paused habit edits the running pause rather than stacking a second one
+  - the state reports `frozen`, the open pause as `freeze: { since, reason, resume_on, resume_due }`
+    (`resume_due` once the planned day has arrived — that is what the reminder popup reads) and
+    every pause as `freezes: [{ start, end, reason, resume_on }]`, `end` exclusive and `null` while open
+  - a paused habit is `due_now: false` / `done_now: true`, and `/api/toggle` and `/api/skip` are
+    refused for its paused days
 - `POST /api/habits` — `{ op: "create", name, emoji?, any_days?: number[], all_days?: number[] }` or `{ op: "delete", id }`
   - `any_days`: array of weekday numbers (0=Sun … 6=Sat) — one hit on any of these days counts
   - `all_days`: array of weekday numbers — every selected day counts; non-selected days are auto-skipped
@@ -117,6 +126,9 @@ How it behaves:
 - **A miss dents, it doesn't erase.** Thirty perfect days followed by three misses still
   reads 72%.
 - **A skip changes nothing.** Skipped days are left out of the walk entirely.
+- **A freeze changes nothing either.** Days inside a pause are left out the same way, and
+  they stay out once the habit is resumed: the freeze period is kept on record, so a
+  break taken deliberately is never re-scored as a run of misses in hindsight.
 - **An open target isn't a miss.** Today counts once it's done (or skipped); until then
   the score just holds, so an unchecked morning never marks you down.
 - **Only the scheduled days count.** `freq` is the habit's target rate (1 daily, 5/7 for

@@ -17,6 +17,9 @@ It shows a green circular gauge of today's completed habits in the toolbar.
   (daily habits + `all_days` habits whose weekday is today), excluding
   `any_days` (any-of-weekday) habits. Those still appear in the list but are
   excluded from the gauge.
+- **Paused habits** (frozen in the web UI) are listed as `Paused` with their
+  checkbox disabled, and count on neither side of the gauge — the server refuses
+  check-ins for a paused day.
 
 ## No local data
 

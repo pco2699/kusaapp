@@ -3,7 +3,7 @@
 // The week used throughout is Mon 2026-08-24 … Sun 2026-08-30.
 import { test, describe, before, after, beforeEach } from 'node:test';
 import assert from 'node:assert/strict';
-import { loadServer, reset, addHabit, daysBefore } from './helpers.mjs';
+import { loadServer, reset, addHabit, daysBefore, freezeHabit } from './helpers.mjs';
 
 const MON = '2026-08-24', TUE = '2026-08-25', WED = '2026-08-26', THU = '2026-08-27';
 const FRI = '2026-08-28', SAT = '2026-08-29', SUN = '2026-08-30';
@@ -305,5 +305,77 @@ describe('state shape', () => {
     assert.equal(parseAnyDays([7, -1, 'x', 1.5]), null);
     assert.equal(parseAnyDays(null), null);
     assert.equal(parseAnyDays('1,2'), null);
+  });
+});
+
+describe('frozen habits', () => {
+  test('a frozen habit is nothing to do today, so it leaves the ring', () => {
+    const id = addHabit(db, { name: 'Gym' });
+    freezeHabit(db, id, { start: FRI, reason: '出張', resumeOn: SUN });
+    const h = only(SUN);
+    assert.equal(h.frozen, true);
+    assert.equal(h.due_now, false, 'a paused habit is not a target');
+    assert.equal(h.done_now, true, 'and so is not outstanding either');
+    assert.equal(ring(SUN), '0/0', 'it counts on neither side of the day');
+  });
+
+  test('the open freeze is reported with its reason and planned resume day', () => {
+    const id = addHabit(db, { name: 'Gym' });
+    freezeHabit(db, id, { start: FRI, reason: '出張のため', resumeOn: SUN });
+    const f = only(SAT).freeze;
+    assert.equal(f.since, FRI);
+    assert.equal(f.reason, '出張のため');
+    assert.equal(f.resume_on, SUN);
+    assert.equal(f.resume_due, false, 'not yet the planned day');
+    assert.equal(only(SUN).freeze.resume_due, true, 'due once the day arrives');
+  });
+
+  test('the paused days cost no strength', () => {
+    addHabit(db, { name: 'Kept', checked: [MON, TUE, WED] });
+    const paused = addHabit(db, { name: 'Paused', checked: [MON, TUE, WED] });
+    freezeHabit(db, paused, { start: THU, reason: 'trip', resumeOn: SUN });
+    assert.equal(getState(SUN).habits[1].score, getState(WED).habits[1].score,
+      'the score is exactly where the freeze found it');
+    assert.ok(getState(SUN).habits[0].score < getState(WED).habits[0].score,
+      'while the same days unfrozen are misses');
+  });
+
+  test('a finished freeze still protects the days it covered', () => {
+    const id = addHabit(db, { name: 'Gym', checked: [MON, TUE, SUN] });
+    // Paused Wed–Sat, resumed on Sunday: `end` is exclusive, so Sunday counts again.
+    freezeHabit(db, id, { start: WED, end: SUN, reason: 'trip', resumeOn: SUN });
+    const h = only(SUN);
+    assert.equal(h.frozen, false, 'the freeze is over');
+    assert.equal(h.due_now, true, 'so the habit is a target again');
+    assert.equal(h.done_now, true, 'and it was checked in on the day it resumed');
+    addHabit(db, { name: 'Open', checked: [MON, TUE, SUN] });
+    assert.ok(getState(SUN).habits[0].score > getState(SUN).habits[1].score,
+      'the frozen gap beats the same gap left open');
+  });
+
+  test('an all-of-weekday habit is not marked down for its frozen weekdays', () => {
+    const id = addHabit(db, { name: 'Work out', mode: 'all', days: WEEKDAYS, checked: [MON, TUE] });
+    freezeHabit(db, id, { start: WED, reason: 'sick', resumeOn: SUN });
+    assert.equal(only(FRI).score, only(TUE).score, 'Wed–Fri carry the score across');
+    assert.equal(only(FRI).due_now, false);
+  });
+
+  test('an any-of-weekday habit is not marked down for a frozen period', () => {
+    const id = addHabit(db, { name: 'Running', mode: 'any', days: WEEKDAYS });
+    freezeHabit(db, id, { start: MON, reason: 'injury', resumeOn: SUN });
+    const h = only(FRI);
+    assert.equal(h.score, 0, 'nothing was lost over the paused week');
+    assert.equal(h.due_now, false);
+  });
+
+  test('the board window keeps the freezes it can still draw', () => {
+    const t = srv.mod.today();
+    const id = addHabit(db, { name: 'Gym', checked: [daysBefore(t, 1)] });
+    freezeHabit(db, id, { start: daysBefore(t, 300), end: daysBefore(t, 290), reason: 'old', resumeOn: daysBefore(t, 290) });
+    freezeHabit(db, id, { start: daysBefore(t, 5), end: daysBefore(t, 2), reason: 'recent', resumeOn: daysBefore(t, 2) });
+    assert.equal(getState(t).habits[0].freezes.length, 2, 'the state carries every freeze');
+    const sliced = srv.mod.sliceState(getState(t), 30);
+    assert.deepEqual(sliced.habits[0].freezes.map(f => f.reason), ['recent'],
+      'only the ones the 30-day board can show');
   });
 });

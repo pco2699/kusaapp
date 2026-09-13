@@ -64,9 +64,9 @@ export async function startServer(extra) {
   };
 }
 
-// Wipes both tables so each test starts from a known board.
+// Wipes every table so each test starts from a known board.
 export function reset(db) {
-  db.exec('DELETE FROM checkins; DELETE FROM habits;');
+  db.exec('DELETE FROM freezes; DELETE FROM checkins; DELETE FROM habits;');
 }
 
 // Inserts a habit and its check-ins. `mode` is 'daily' | 'any' | 'all'.
@@ -88,4 +88,11 @@ export function daysBefore(from, n) {
   d.setDate(d.getDate() - n);
   const m = d.getMonth() + 1, day = d.getDate();
   return d.getFullYear() + '-' + (m < 10 ? '0' : '') + m + '-' + (day < 10 ? '0' : '') + day;
+}
+
+// Freezes a habit over a date range. `end` is exclusive; leave it out for a freeze that
+// is still running (which is what "the habit is paused right now" means).
+export function freezeHabit(db, id, { start, end = null, reason = 'reason', resumeOn = start }) {
+  db.prepare('INSERT INTO freezes (habit_id, start_date, end_date, reason, resume_on) VALUES (?,?,?,?,?)')
+    .run(id, start, end, reason, resumeOn);
 }
