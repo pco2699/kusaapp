@@ -266,6 +266,11 @@ const Q_HABIT_ADD = db.prepare(
   'INSERT INTO habits (name, emoji, any_days, all_days, sort) ' +
   'VALUES (?, ?, ?, ?, (SELECT COALESCE(MAX(sort), -1) + 1 FROM habits))'
 );
+// Editing a habit rewrites only what the form collects: the check-ins and freezes hang
+// off the id, so a renamed or rescheduled habit keeps every day it has already earned.
+const Q_HABIT_UPDATE = db.prepare(
+  'UPDATE habits SET name=?, emoji=?, any_days=?, all_days=? WHERE id=? AND archived=0'
+);
 // The `sort` column has been in the schema (and in Q_HABITS' ORDER BY) from the start;
 // this is what finally writes to it.
 const Q_HABIT_SORT = db.prepare('UPDATE habits SET sort=? WHERE id=? AND archived=0');
@@ -984,6 +989,7 @@ const I18N = {
     weekday:'平日', weekend:'土日', allDays:'全部', cancel:'キャンセル', add:'追加', enterKey:'🔑 アクセスキーを入力',
     empty:'🌱 「＋ 新しい習慣」から最初の習慣を追加しよう', offline:'オフライン — キャッシュ表示中',
     totalTitle:'累計', delete:'削除', delConfirm1:'「', delConfirm2:'」を削除？', stats:'統計', more:'メニュー',
+    edit:'編集', editHabit:'習慣を編集', save:'保存',
     skip:'スキップ', skipHint:'長押し/右クリックでスキップ',
     strength:'習慣の強さ', strengthCap:'直近30日の推移',
     daySep:'・', anySuffix:'のどれか1回', allSuffix:' すべて',
@@ -1010,6 +1016,7 @@ const I18N = {
     weekday:'Weekdays', weekend:'Weekend', allDays:'All', cancel:'Cancel', add:'Add', enterKey:'🔑 Enter access key',
     empty:'🌱 Add your first habit with the ＋ button', offline:'Offline — showing cached data',
     totalTitle:'Total check-ins', delete:'Delete', delConfirm1:'Delete "', delConfirm2:'"?', stats:'Stats', more:'Menu',
+    edit:'Edit', editHabit:'Edit habit', save:'Save',
     skip:'skip', skipHint:'long-press/right-click to skip',
     strength:'Habit strength', strengthCap:'last 30 days',
     daySep:'/', anySuffix:' (any one)', allSuffix:' (all)',
@@ -1134,9 +1141,14 @@ function scoreOn(h, ds){
 const QKEY = 'habitsq';
 function qAll(){ try { return JSON.parse(localStorage.getItem(QKEY) || '[]'); } catch { return []; } }
 function qSave(q){ localStorage.setItem(QKEY, JSON.stringify(q)); }
+// A repeated toggle or skip is the user taking it back, so an identical entry already
+// waiting cancels out instead of replaying twice. Nothing else is its own undo: saving
+// the same edit twice while offline has to stay queued, or the two would cancel and the
+// habit would come back from the flush unedited.
 function enqueue(path, body){
   const q = qAll();
-  const i = q.findIndex(e => e.path === path && JSON.stringify(e.body) === JSON.stringify(body));
+  const undoable = path === '/api/toggle' || path === '/api/skip';
+  const i = undoable ? q.findIndex(e => e.path === path && JSON.stringify(e.body) === JSON.stringify(body)) : -1;
   if (i >= 0) q.splice(i, 1); else q.push({ path: path, body: body });
   qSave(q);
 }
@@ -1727,7 +1739,56 @@ function toggleEmoji(){
   document.getElementById('emojipicker').classList.toggle('open');
 }
 
-function openAdd(){ document.getElementById('adddlg').showModal(); }
+// The add dialog doubles as the edit dialog: one form, so the fields a habit can be
+// created with and the fields it can be corrected with cannot drift apart. editCtx
+// holds the habit id while the dialog is editing, and is null while it is adding.
+let editCtx = null;
+function selectMode(val){
+  document.querySelectorAll('#modes label').forEach(function(lab){
+    const inp = lab.querySelector('input');
+    const on = inp.value === val;
+    inp.checked = on;
+    lab.classList.toggle('sel', on);
+  });
+  const dlg = document.getElementById('adddlg');
+  dlg.classList.toggle('any', val === 'any');
+  dlg.classList.toggle('all', val === 'all');
+}
+function setDows(days){
+  document.querySelectorAll('#dows .chip').forEach(function(c){
+    c.classList.toggle('on', !!days && days.indexOf(Number(c.dataset.w)) >= 0);
+  });
+}
+function resetHabitForm(){
+  // close() without an argument leaves returnValue alone, so the 'ok' from the last
+  // save would still be sitting there and make the next cancel (or Esc) look like a
+  // submit. Clearing it on the way in is what makes "cancel" mean cancel.
+  document.getElementById('adddlg').returnValue = '';
+  document.querySelector('#adddlg input[name=name]').value = '';
+  document.getElementById('emoji-val').value = '';
+  document.getElementById('emojibtn').textContent = '🙂';
+  document.getElementById('emojipicker').classList.remove('open');
+  selectMode('daily');
+  setDows(null);
+}
+function openAdd(){
+  editCtx = null;
+  resetHabitForm();
+  document.getElementById('newhabit-title').textContent = t('newHabit');
+  document.querySelector('#adddlg .primary').textContent = t('add');
+  document.getElementById('adddlg').showModal();
+}
+function openEdit(h){
+  editCtx = h.id;
+  resetHabitForm();
+  document.getElementById('newhabit-title').textContent = t('editHabit');
+  document.querySelector('#adddlg .primary').textContent = t('save');
+  document.querySelector('#adddlg input[name=name]').value = h.name || '';
+  if (h.emoji) pickEmoji(h.emoji);
+  selectMode(h.any_days ? 'any' : (h.all_days ? 'all' : 'daily'));
+  setDows(h.any_days || h.all_days);
+  document.getElementById('adddlg').showModal();
+}
 function closeAdd(){ document.getElementById('adddlg').close(); }
 
 // ---------- stats popup + overflow menu ----------
@@ -1775,6 +1836,12 @@ function openMenu(h, x, y){
   menuCtx = h;
   const m = document.getElementById('hmenu');
   m.innerHTML = '';
+  // Editing comes first: fixing a typo or a schedule is the everyday reason to open
+  // this menu, and it sits furthest from the destructive entry at the bottom.
+  const ed = document.createElement('button');
+  ed.textContent = t('edit');
+  ed.addEventListener('click', function(){ closeMenu(); openEdit(h); });
+  m.appendChild(ed);
   // Pausing needs a reason and a date, so it opens a dialog; resuming is a single tap,
   // because a paused habit must be trivially easy to bring back.
   const f = document.createElement('button');
@@ -1791,7 +1858,7 @@ function openMenu(h, x, y){
   m.appendChild(b);
   m.classList.add('open');
   m.style.left = Math.min(x, window.innerWidth - 170) + 'px';
-  m.style.top = Math.min(y, window.innerHeight - 100) + 'px';
+  m.style.top = Math.min(y, window.innerHeight - 150) + 'px';
 }
 function closeMenu(){
   document.getElementById('hmenu').classList.remove('open');
@@ -1914,12 +1981,8 @@ document.getElementById('legend-btn').addEventListener('click', showLegend);
 // add dialog: mode + weekday chips
 document.querySelectorAll('#modes label').forEach(lab => {
   lab.addEventListener('click', () => {
-    document.querySelectorAll('#modes label').forEach(x => x.classList.remove('sel'));
-    lab.classList.add('sel');
-    const dlg = document.getElementById('adddlg');
     const val = lab.querySelector('input').value;
-    dlg.classList.toggle('any', val === 'any');
-    dlg.classList.toggle('all', val === 'all');
+    selectMode(val);
     if ((val === 'any' || val === 'all') && !document.querySelector('#dows .chip.on')) {
       document.querySelectorAll('#dows .chip').forEach(c => { if ([1,2,3,4,5].indexOf(Number(c.dataset.w)) >= 0) c.classList.add('on'); });
     }
@@ -1941,14 +2004,14 @@ document.querySelectorAll('.presets .pre').forEach(btn => {
 
 document.getElementById('adddlg').addEventListener('close', e => {
   const dlg = document.getElementById('adddlg');
+  // The dialog is reset when it is opened, not when it closes, so an edit that is
+  // cancelled leaves nothing behind for the next habit that opens the form.
+  const id = editCtx;
+  editCtx = null;
   if (dlg.returnValue !== 'ok') return;
   const name = dlg.querySelector('input[name=name]').value.trim();
   const emoji = dlg.querySelector('input[name=emoji]').value.trim();
   const mode = dlg.querySelector('input[name=mode]:checked').value;
-  dlg.querySelector('input[name=name]').value = '';
-  document.getElementById('emoji-val').value = '';
-  document.getElementById('emojibtn').textContent = '🙂';
-  document.getElementById('emojipicker').classList.remove('open');
   if (!name) return;
   let any = null, all = null;
   if (mode === 'any' || mode === 'all') {
@@ -1957,7 +2020,10 @@ document.getElementById('adddlg').addEventListener('close', e => {
     if (!sel.length) return;
     if (mode === 'any') any = sel; else all = sel;
   }
-  apiWrite('/api/habits', { op:'create', name: name, emoji: emoji, any_days: any, all_days: all }).then(r => {
+  const body = id
+    ? { op:'update', id: id, name: name, emoji: emoji, any_days: any, all_days: all }
+    : { op:'create', name: name, emoji: emoji, any_days: any, all_days: all };
+  apiWrite('/api/habits', body).then(r => {
     if (!r || !r.queued) load();
   });
 });
@@ -2241,6 +2307,21 @@ const server = createServer(async (req, res) => {
       Q_HABIT_ARCHIVE.run(id);
       invalidateState();
       return json(res, 200, { ok: true });
+    }
+    // Same fields and same validation as a create, against an existing row. A check-in
+    // already recorded on a day the new schedule no longer allows simply stops counting
+    // towards the score; it is left in the table rather than deleted, so switching the
+    // schedule back brings the history back with it.
+    if (b.op === 'update' && b.id) {
+      const id = habitId(b.id);
+      if (!id || !Q_HABIT_EXISTS.get(id)) return json(res, 404, { error: 'habit not found' });
+      const name = (b.name || '').trim();
+      if (!name) return json(res, 400, { error: 'name required' });
+      const any = parseAnyDays(b.any_days);
+      const all = parseAnyDays(b.all_days);
+      Q_HABIT_UPDATE.run(name, (b.emoji||'').trim(), any ? JSON.stringify(any) : null, all ? JSON.stringify(all) : null, id);
+      invalidateState();
+      return json(res, 200, { ok: true, id: id });
     }
     const name = (b.name || '').trim();
     if (!name) return json(res, 400, { error: 'name required' });

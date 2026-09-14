@@ -29,8 +29,8 @@ That's `POST /api/skip`, *not* a check-in. A skipped day leaves the strength exa
 **"I blew it this week."**
 Say what it actually cost. A few missed days take a strong habit down a handful of points, not to zero — "you're at 72%, down from 80; two good days puts most of it back" is true, checkable against `score_history`, and the reason the app works this way.
 
-**"Add a habit."** / **"Drop that one."**
-`POST /api/habits` with `op: create` / `op: delete`. Deletes are soft and recoverable, but confirm first: from their side, the history disappears with it.
+**"Add a habit."** / **"Fix that one."** / **"Drop that one."**
+`POST /api/habits` with `op: create` / `op: update` / `op: delete`. An update rewrites every field it takes, so send the habit as it should end up, not just the part that changed — omitting `emoji` or the weekday arrays clears them. The history stays with the id either way. Deletes are soft and recoverable, but confirm first: from their side, the history disappears with it.
 
 ## How habits are shaped
 
@@ -56,7 +56,7 @@ Auth: `?key=<token>` or `Authorization: Bearer <token>`.
 | `POST /api/toggle` `{ habit_id, date? }` | check in / undo; `date` defaults to today (`YYYY-MM-DD`) |
 | `POST /api/skip` `{ habit_id, date? }` | mark skipped / unskip |
 | `POST /api/freeze` | `{ habit_id, reason, resume_on }` pauses (both required, `resume_on` = `YYYY-MM-DD`, not past), or `{ op:"unfreeze", habit_id }` resumes |
-| `POST /api/habits` | `{ op:"create", name, emoji?, any_days?, all_days? }` → `{ id }`, `{ op:"delete", id }`, or `{ op:"reorder", ids:[…] }` (the habits in the order they should appear) |
+| `POST /api/habits` | `{ op:"create", name, emoji?, any_days?, all_days? }` → `{ id }`, `{ op:"update", id, name, emoji?, any_days?, all_days? }` (rewrites every field; history is kept), `{ op:"delete", id }`, or `{ op:"reorder", ids:[…] }` (the habits in the order they should appear) |
 | `GET /api/health` | `{ ok: true }` |
 
 Habits come back in the user's own order (what they arranged in the app), so keep that

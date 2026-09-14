@@ -23,6 +23,7 @@ A minimal habit tracker that runs as a **single Node.js file** (zero npm depende
 - 🔄 **Update prompt** — a deploy changes the fingerprint baked into `sw.js`, so the new worker installs and waits; the open app offers "新しいバージョンがあります / A new version is available" and only swaps in and reloads when you accept
 - 🌓 **Dark / light theme** — toggle in the header (🌙/☀️), follows the system preference by default, persisted per device (`?theme=dark|light` also works)
 - 🖥️ **Responsive** — 7-day grid on phones, up to 45 days on wide screens (cells scale up)
+- ✏️ **Edit** — a habit's name, icon and weekday schedule can be corrected from the ⋮ menu, in the same form it was added with. The check-ins keep their habit, so fixing a typo or moving a habit off the weekend costs nothing already earned
 - 🌱 Archiving (soft delete) — history is never lost
 - ⚡ **Fast first paint** — the server inlines the initial state into the HTML, so the
   board renders on arrival instead of after a round trip to `/api/state`
@@ -101,7 +102,11 @@ names, so nothing touches your `habits.db`.
     every pause as `freezes: [{ start, end, reason, resume_on }]`, `end` exclusive and `null` while open
   - a paused habit is `due_now: false` / `done_now: true`, and `/api/toggle` and `/api/skip` are
     refused for its paused days
-- `POST /api/habits` — `{ op: "create", name, emoji?, any_days?: number[], all_days?: number[] }`, `{ op: "delete", id }` or `{ op: "reorder", ids: number[] }`
+- `POST /api/habits` — `{ op: "create", name, emoji?, any_days?: number[], all_days?: number[] }`, `{ op: "update", id, name, emoji?, any_days?, all_days? }`, `{ op: "delete", id }` or `{ op: "reorder", ids: number[] }`
+  - `update` takes the same fields as `create` and rewrites all of them, so a field left out is
+    cleared (no emoji, no weekday schedule). Check-ins, skips and pauses hang off the id and are
+    untouched; a check-in on a day the new schedule no longer allows stops counting but stays on
+    record, so switching the schedule back brings it back
   - `reorder` takes the habits in the order you want them and writes that to the `sort`
     column; `/api/state` returns habits in that order (`sort`, then `id`). A new habit
     takes the next free slot, so it lands after the ones already arranged

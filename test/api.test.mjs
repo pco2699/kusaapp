@@ -140,6 +140,44 @@ describe('habits', () => {
     assert.equal(h.any_days, null);
   });
 
+  test('update rewrites the name, the emoji and the schedule', async () => {
+    const { id } = await (await create({ name: 'Runing', emoji: '🙂', any_days: [1, 2, 3] })).json();
+    const r = await s.post('/api/habits', { op: 'update', id, name: 'Running', emoji: '🏃', all_days: [1, 5] });
+    assert.equal(r.status, 200);
+    assert.deepEqual(await r.json(), { ok: true, id });
+    const [h] = (await state()).habits;
+    assert.equal(h.id, id, 'the habit keeps its id');
+    assert.deepEqual([h.name, h.emoji], ['Running', '🏃']);
+    assert.equal(h.any_days, null, 'the old schedule is cleared');
+    assert.deepEqual(h.all_days, [1, 5]);
+  });
+
+  test('update keeps the check-ins the habit already has', async () => {
+    const { id } = await (await create({ name: 'Read' })).json();
+    await s.post('/api/toggle', { habit_id: id });
+    await s.post('/api/habits', { op: 'update', id, name: 'Read a book' });
+    const [h] = (await state()).habits;
+    assert.equal(h.name, 'Read a book');
+    assert.equal(h.total, 1, 'the history survives the edit');
+    assert.equal(h.done_now, true);
+  });
+
+  test('update needs a name and a habit that exists', async () => {
+    const { id } = await (await create({ name: 'Read' })).json();
+    const blank = await s.post('/api/habits', { op: 'update', id, name: '  ' });
+    assert.equal(blank.status, 400);
+    assert.deepEqual(await blank.json(), { error: 'name required' });
+    const gone = await s.post('/api/habits', { op: 'update', id: id + 999, name: 'Ghost' });
+    assert.equal(gone.status, 404);
+    assert.equal((await state()).habits[0].name, 'Read', 'a rejected edit changes nothing');
+  });
+
+  test('update leaves an archived habit alone', async () => {
+    const { id } = await (await create({ name: 'Gone' })).json();
+    await s.post('/api/habits', { op: 'delete', id });
+    assert.equal((await s.post('/api/habits', { op: 'update', id, name: 'Back' })).status, 404);
+  });
+
   test('delete archives the habit out of the state', async () => {
     const { id } = await (await create({ name: 'Gone' })).json();
     assert.equal((await s.post('/api/habits', { op: 'delete', id })).status, 200);
