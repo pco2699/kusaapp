@@ -55,6 +55,7 @@ All settings live in `config.json` (copy from `config.example.json`):
 | `token` | *(no default)* | Access key required by every authenticated request — set a long random string. Passed as `?key=…` or `Authorization: Bearer` |
 | `lang` | `"ja"` | UI language: `"ja"` (Japanese) or `"en"` (English). Also sets the `<html lang>` and date formatting |
 | `db` | `habits.db` *(next to `server.mjs`)* | Path to the SQLite file, resolved relative to the config file |
+| `proxyAuthHeader` | *(unset)* | Header a signing-in reverse proxy sets for logged-in users, e.g. `"X-Auth-Request-Email"`. A request carrying it needs no key, so the web UI stops asking for one. See [Behind a login proxy](#behind-a-login-proxy) |
 
 Set `KUSA_CONFIG` to run against a config file somewhere else — that is how one checkout
 can serve several instances, and how the tests keep off your real database:
@@ -210,6 +211,31 @@ dependencies to fetch.
    so it keeps running when you are not logged in.
 2. `deploy/nginx.conf.example` — a vhost proxying your domain to `127.0.0.1:8090`. Enable it,
    reload nginx, then `sudo certbot --nginx -d <your-domain> --redirect` for TLS.
+
+### Behind a login proxy
+
+If the site already sits behind a proxy that signs you in (oauth2-proxy with nginx
+`auth_request`, Cloudflare Access, …), the key is a second password for the same person.
+Set `proxyAuthHeader` to the header the proxy adds for a logged-in user and the server
+accepts that header in place of the key:
+
+```nginx
+auth_request_set $auth_email $upstream_http_x_auth_request_email;
+location / {
+    proxy_pass http://127.0.0.1:8090;
+    proxy_set_header X-Auth-Request-Email $auth_email;   # always overwrites a client's copy
+}
+```
+
+The web UI then works without a key. When the proxy's login lapses it sends the page back
+through the login, keeping writes made in between in the offline queue. The token still
+works, so the Chrome extension and the agent skill keep using it — let requests carrying
+`Authorization: Bearer` or `/api/…?key=` past the proxy's login, since the server checks
+those itself.
+
+> Only set this when the proxy **always** sets the header (an empty value for anyone it
+> did not sign in) and the server is reachable through nothing else. Anyone who can reach
+> the port directly can send the header and skip every check.
 
 ### Continuous deployment
 
