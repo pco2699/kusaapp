@@ -7,8 +7,12 @@ on:
   # Called by deploy.yml, so a deploy always runs the same checks.
   workflow_call:
 
+# Keyed by workflow too: called from deploy.yml, github.workflow is "Deploy", so the
+# deploy's own test run and the push-triggered CI run on main land in different
+# groups. With one group, a merge started both at once and one cancelled the other,
+# taking the deploy down with it.
 concurrency:
-  group: ci-${{ github.ref }}
+  group: ci-${{ github.workflow }}-${{ github.ref }}
   cancel-in-progress: true
 
 jobs:
