@@ -137,7 +137,18 @@ function json(res, code, obj) {
   res.end(body);
 }
 
+// A reverse proxy that has already signed the user in (e.g. oauth2-proxy behind nginx
+// auth_request) can vouch for a request with a header instead of the key. Off unless
+// config.json names the header, and only safe when the proxy always overwrites it and
+// the server is reachable through nothing else.
+const PROXY_AUTH_HEADER = (CONFIG.proxyAuthHeader || '').toLowerCase();
+
+function proxyAuthed(req) {
+  return !!PROXY_AUTH_HEADER && !!req.headers[PROXY_AUTH_HEADER];
+}
+
 function authorized(req, urlObj) {
+  if (proxyAuthed(req)) return true;
   const qk = urlObj.searchParams.get('key');
   const auth = req.headers['authorization'] || '';
   const bearer = auth.startsWith('Bearer ') ? auth.slice(7) : '';
@@ -529,6 +540,8 @@ self.addEventListener('fetch', e => {
   if (req.method !== 'GET') return;
   const url = new URL(req.url);
   if (url.origin !== self.location.origin) return;
+  // The page asking a signing-in proxy for a fresh login: it must reach the network.
+  if (url.searchParams.has('signin')) return;
   const cacheName = dailyV();
   // Activation does not run at midnight, so remove expired daily caches lazily on
   // the first request after the date changes.
@@ -537,8 +550,11 @@ self.addEventListener('fetch', e => {
   if (isApi) {
     e.respondWith(
       fetch(req).then(r => {
-        const cp = r.clone();
-        caches.open(cacheName).then(c => c.put(req, cp));
+        // Only real answers are worth replaying offline — not a 401 or a login redirect.
+        if (r.ok) {
+          const cp = r.clone();
+          caches.open(cacheName).then(c => c.put(req, cp));
+        }
         return r;
       }).catch(() => caches.open(cacheName).then(c => c.match(req)).then(m => m || new Response('{"offline":true}', { status: 503, headers: { 'Content-Type': 'application/json' } })))
     );
@@ -976,6 +992,11 @@ const HTML_SHELL = `<!doctype html>
 const HTML_APP = `<script>
 let KEY = localStorage.getItem('key') || new URLSearchParams(location.search).get('key');
 if (KEY) localStorage.setItem('key', KEY);
+// Set when a signing-in proxy vouches for every request (config.proxyAuthHeader). The key
+// is optional then: a browser that has one keeps sending it, one without rides on the login.
+const PROXY_AUTH = ${PROXY_AUTH_HEADER ? 'true' : 'false'};
+// Back from the proxy's login page: drop the marker that made the worker step aside.
+if (new URLSearchParams(location.search).has('signin')) history.replaceState(null, '', location.pathname);
 // Matches the slice the server inlines into this document, so the revalidating fetch
 // asks for exactly the same payload and usually costs nothing but a 304.
 const BOOT_DAYS = ${BOOT_DAYS};
@@ -1112,11 +1133,30 @@ window.addEventListener('unhandledrejection', ev => err(String(ev.reason && ev.r
 function showAuth(){ const d=document.getElementById('authdlg'); if (!d.open) d.showModal(); }
 const BASE = location.pathname.endsWith('/') ? location.pathname : location.pathname + '/';
 
+// The proxy answers a lapsed login with a redirect to its sign-in page, which a fetch
+// cannot follow cross-origin. So API calls ask for it unfollowed and send the page instead.
+const SIGNED_OUT = new Error('signed out');
+function signIn(){
+  // Once a minute at most: a login that does not stick must not bounce the page forever.
+  const last = Number(sessionStorage.getItem('signin') || 0);
+  if (Date.now() - last < 60000) { showAuth(); return; }
+  sessionStorage.setItem('signin', String(Date.now()));
+  // ?signin makes the worker step aside, so the navigation reaches the proxy rather
+  // than the cached shell.
+  location.replace(BASE + '?signin');
+}
 async function api(path, opts={}) {
   path = path.replace(/^\\/+/, '');
   const sep = path.includes('?') ? '&' : '?';
-  const res = await fetch(BASE + path + sep + 'key=' + encodeURIComponent(KEY), opts);
-  if (res.status === 401) { showAuth(); throw new Error('unauthorized (key?)'); }
+  const res = await fetch(BASE + path + (KEY ? sep + 'key=' + encodeURIComponent(KEY) : ''),
+    PROXY_AUTH ? { ...opts, redirect: 'manual' } : opts);
+  if (res.type === 'opaqueredirect') { signIn(); throw SIGNED_OUT; }
+  if (res.status === 401) {
+    // Behind the proxy, a key that no longer matches is what turns a signed-in request
+    // into a 401 (a key routes it around the login). Forget it and go again.
+    if (PROXY_AUTH && KEY) { KEY = null; localStorage.removeItem('key'); return api(path, opts); }
+    showAuth(); throw new Error('unauthorized (key?)');
+  }
   return res;
 }
 function esc(s){return s.replace(/[&<>"]/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c]))}
@@ -1176,7 +1216,8 @@ async function apiWrite(path, body){
   try {
     return await api(path, { method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify(body) });
   } catch (e) {
-    if (!navigator.onLine || (e && e instanceof TypeError)) { enqueue(path, body); return { queued: true }; }
+    // Signed out: keep the write for after the login, like an offline one.
+    if (!navigator.onLine || (e && e instanceof TypeError) || e === SIGNED_OUT) { enqueue(path, body); return { queued: true }; }
     throw e;
   }
 }
@@ -1681,11 +1722,12 @@ rowsEl.addEventListener('pointerover', function(e){
 });
 
 async function load() {
-  if (!KEY) { showAuth(); return; }
+  if (!KEY && !PROXY_AUTH) { showAuth(); return; }
   let st;
   try {
     st = await (await api('/api/state?days=' + BOOT_DAYS)).json();
   } catch (e) {
+    if (e === SIGNED_OUT) return; // the page is already on its way to the login
     if (!navigator.onLine) {
       if (!CURRENT) document.getElementById('today-line').textContent = t('offline');
       return;
@@ -2201,6 +2243,8 @@ const server = createServer(async (req, res) => {
   // The app document. When the request is authenticated the state is inlined, so the
   // page renders on arrival with no follow-up round trip.
   if (req.method === 'GET' && p === '/') {
+    // Signed in by the proxy: no key changed hands, so there is nothing to park in a cookie.
+    if (proxyAuthed(req)) return send(req, res, htmlBundle(), REVALIDATE);
     if (keyed) return send(req, res, htmlBundle(), REVALIDATE, { 'Set-Cookie': SET_COOKIE });
     if (cookieToken(req) === token) return send(req, res, htmlBundle(), REVALIDATE);
     return send(req, res, HTML_ANON, REVALIDATE);
